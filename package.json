@@ -1,0 +1,20 @@
+{
+  "name": "buidlai-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.mjs",
+    "start": "node server.mjs",
+    "build:privy": "vite build --config vite.privy.config.mjs"
+  },
+  "dependencies": {
+    "@privy-io/react-auth": "^2.24.0",
+    "@vitejs/plugin-react": "^6.0.2",
+    "vite": "^8.0.13",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "viem": "^2.33.1"
+  },
+  "devDependencies": {}
+}
