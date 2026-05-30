@@ -1,5 +1,62 @@
 const API_BASE = "/api";
 const TICK = "BUIDL";
+
+// ======================== i18n (zh / en) ========================
+let currentLang = "zh";
+try { currentLang = localStorage.getItem("lang") === "en" ? "en" : "zh"; } catch (_) { /* ignore */ }
+
+// Pick the string for the active language. Used everywhere dynamic text is rendered.
+function t(zh, en) { return currentLang === "en" ? en : zh; }
+
+// Swap all static [data-zh]/[data-en] text + placeholders to the active language.
+function applyStaticLang() {
+  const en = currentLang === "en";
+  document.querySelectorAll("[data-zh]").forEach((el) => {
+    const val = el.getAttribute(en ? "data-en" : "data-zh");
+    if (val != null) el.textContent = val;
+  });
+  document.querySelectorAll("[data-zh-ph]").forEach((el) => {
+    const val = el.getAttribute(en ? "data-en-ph" : "data-zh-ph");
+    if (val != null) el.setAttribute("placeholder", val);
+  });
+  document.documentElement.setAttribute("lang", en ? "en" : "zh-CN");
+}
+
+function setLang(lang) {
+  currentLang = lang === "en" ? "en" : "zh";
+  try { localStorage.setItem("lang", currentLang); } catch (_) { /* ignore */ }
+  applyStaticLang();
+  document.querySelectorAll(".lang-option").forEach((b) => {
+    b.classList.toggle("is-active", b.getAttribute("data-lang") === currentLang);
+  });
+  // Re-render the active dynamic view so JS-generated text picks up the language.
+  try { renderRoute(window.location.pathname); } catch (_) { /* ignore */ }
+  try { renderActivityTicker(); } catch (_) { /* ignore */ }
+  scheduleAlignHero();
+}
+
+function setupLangToggle() {
+  document.querySelectorAll(".lang-option").forEach((b) => {
+    b.addEventListener("click", () => setLang(b.getAttribute("data-lang")));
+    b.classList.toggle("is-active", b.getAttribute("data-lang") === currentLang);
+  });
+  applyStaticLang();
+}
+
+// Align the home hero: the image top crosses the vertical center of the
+// Explore card, while the protocol label shares the card's top edge.
+function alignHero() {
+  const grid = document.querySelector(".hero-grid");
+  const card = document.querySelector(".hero-grid .network-card");
+  if (!grid || !card) return;
+  if (window.matchMedia("(max-width: 980px)").matches) {
+    grid.style.removeProperty("--hero-top-offset");
+    return;
+  }
+  grid.style.setProperty("--hero-top-offset", `${Math.round(card.offsetHeight / 2)}px`);
+}
+const scheduleAlignHero = () => requestAnimationFrame(() => requestAnimationFrame(alignHero));
+
 const ACCOUNT_STORAGE_KEY = "accountInfo";
 const BOND_ETH_MESSAGE = JSON.stringify(
   {
@@ -29,6 +86,8 @@ let bnbUsd = 650;
 let currentTrades = [];
 let currentAccount = null;
 let hubRewardSeries = null;
+let communityActivities = [];
+let activityIndex = 0;
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -55,6 +114,20 @@ function formatUsd(value) {
 
 function safeText(value, fallback = "") {
   return value === null || value === undefined || value === "" ? fallback : String(value);
+}
+
+function translateActionType(actionType) {
+  const action = String(actionType || "");
+  const labels = {
+    "Post Signal": t("发布信号", "Post Signal"),
+    Buy: t("买入", "Buy"),
+    Sell: t("卖出", "Sell"),
+    Upvote: t("投票", "Upvote"),
+    Comment: t("评论", "Comment"),
+    Tip: t("打赏", "Tip"),
+    "Dark Forest": t("黑暗森林", "Dark Forest")
+  };
+  return labels[action] || safeText(action, t("动态", "Activity"));
 }
 
 function profileImageUrl(account) {
@@ -397,7 +470,7 @@ function renderAgentsList() {
     row.className = "agent-row";
     const mainMetric =
       agentTab === "credit"
-        ? `<strong>${formatNumber(agent.credit)}</strong><small>Credit</small>`
+        ? `<strong>${formatNumber(agent.credit)}</strong><small>Reputation</small>`
         : agentTab === "earn"
           ? `<strong>${formatNumber(agent.earn)}</strong><small>Earn</small>`
           : `<strong>${formatUsd(agent.priceUsd)} / ${formatNumber(agent.supply)}</strong><small>Price / Supply</small>`;
@@ -408,7 +481,7 @@ function renderAgentsList() {
         <div class="agent-name-line"><strong>${safeText(agent.name, "BUIDL Agent")}</strong><span>@${safeText(agent.username, "agent")}</span></div>
         <div class="agent-subline">
           <span>IPShare · ${formatUsd(agent.priceUsd)}</span>
-          <span>Credit · ${formatNumber(agent.credit)}</span>
+          <span>Reputation · ${formatNumber(agent.credit)}</span>
           <span>Earn ${formatNumber(agent.earn)} $BUIDL</span>
         </div>
       </div>
@@ -505,7 +578,7 @@ function renderMiniFeed(selector, tweets, mode = "signal") {
   feed.innerHTML = "";
   const items = Array.isArray(tweets) && tweets.length ? tweets.slice(0, 4) : [];
   if (!items.length) {
-    feed.innerHTML = `<article class="mini-post"><strong>No BUIDL ${mode === "vote" ? "validation" : "signals"} yet</strong><p>这里将显示当前登录用户在 #BUIDL 社区的${mode === "vote" ? "互动、点赞、评论和验证投票" : "发帖"}。</p><footer>#${TICK}</footer></article>`;
+    feed.innerHTML = `<article class="mini-post"><strong>${mode === "vote" ? t("暂无验证投票", "No validations yet") : t("暂无信号", "No signals yet")}</strong><p>${mode === "vote" ? t("这里将显示当前登录用户在 #BUIDL 社区的互动、点赞、评论和验证投票。", "Your interactions, likes, comments and validation votes in #BUIDL will appear here.") : t("这里将显示当前登录用户在 #BUIDL 社区的发帖。", "Your posts in the #BUIDL community will appear here.")}</p><footer>#${TICK}</footer></article>`;
     return;
   }
   items.forEach((tweet) => {
@@ -525,58 +598,162 @@ function applyCommunityData(community) {
   if (!community || typeof community !== "object") return;
   currentCommunity = community;
   $("#activeTick").textContent = community.tick || TICK;
-  const marketCap = Number(community.marketCap || community.mCap || 0);
-  if (marketCap > 0) {
-    $("#buidlStaked").textContent = formatNumber(marketCap);
-    $("#stakedCount").textContent = `${formatNumber(marketCap / 1000000)}M`;
-  }
+}
+
+function getIssuedDistribution() {
+  const rows = getDistributionRows();
+  if (!rows.length) return 0;
+  const now = Math.ceil(Date.now() / 1000);
+  return rows.reduce((sum, row) => {
+    const start = Number(row.start || 0);
+    const end = Number(row.end || 0);
+    const amount = Number(row.amount || 0);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || !Number.isFinite(amount) || now <= start) return sum;
+    return sum + Math.max(0, Math.min(now, end) - start) * amount;
+  }, 0);
+}
+
+function getBuidlFdvUsd() {
+  const marketCapBnb = Number(currentCommunity?.marketCap || currentCommunity?.mCap || 0);
+  if (marketCapBnb > 0) return marketCapBnb * bnbUsd;
+  const latestTrade = currentTrades.slice().reverse().find((row) =>
+    Number(row?.close || row?.high || row?.low || row?.open || 0) > 0
+  );
+  const marketCapRaw = Number(latestTrade?.close || latestTrade?.high || latestTrade?.low || latestTrade?.open || 0);
+  return marketCapRaw > 0 ? (marketCapRaw / 1e9) * bnbUsd : 0;
+}
+
+function applyValueDiscoveryMetrics(tweets = currentTweets) {
+  const tweetList = Array.isArray(tweets) ? tweets : [];
+  $("#signalPosts").textContent = formatNumber(tweetList.length || 0);
+  const connections = tweetList.reduce((sum, item) =>
+    sum + Number(item.replyCount || 0) + Number(item.retweetCount || 0) + Number(item.likeCount || 0) + Number(item.quoteCount || 0), 0);
+  $("#connectCount").textContent = formatNumber(connections);
+  $("#creditIssued").textContent = formatNumber(getIssuedDistribution() || Number(currentCommunity?.totalClaimedSocialRewards || 0));
+  $("#buidlFdv").textContent = formatUsd(getBuidlFdvUsd());
+}
+
+function buildExploreNetworkMetrics({ community, tweets } = {}) {
+  const tweetList = Array.isArray(tweets) ? tweets : [];
+  return {
+    signalMinersCount: uniqueCount(tweetList, (row) => row.twitterId || row.twitterUsername || row.ethAddr),
+    signalCount: tweetList.length,
+    miningCount: getTotalDistribution() || Number(community?.totalClaimedSocialRewards || 0)
+  };
+}
+
+function applyExploreNetworkMetrics(metrics) {
+  if (!metrics || typeof metrics !== "object") return false;
+  $("#signalMinersCount").textContent = formatNumber(metrics.signalMinersCount || 0);
+  $("#signalCount").textContent = formatNumber(metrics.signalCount || 0);
+  $("#signalPosts").textContent = formatNumber(metrics.signalCount || 0);
+  $("#miningCount").textContent = formatNumber(metrics.miningCount || 0);
+  scheduleAlignHero();
+  return true;
 }
 
 function applyIpshareData(ipshares) {
   if (!Array.isArray(ipshares)) return;
   currentIpshares = ipshares;
-  $("#agentsCount").textContent = formatNumber(ipshares.length);
-  const totalSupply = ipshares.reduce((sum, row) => {
-    const raw = Number(row.supply || row.shareSupply || 0);
-    return sum + (raw > 1e12 ? raw / 1e18 : raw);
-  }, 0);
-  if (totalSupply > 0) $("#creditIssued").textContent = formatNumber(totalSupply);
 }
 
 let _hubLoadInFlight = false;
 let _hubLastLoadAt = 0;
+// Last-good per-section values so a transient endpoint failure never wipes the hub to 0.
+// Persisted to localStorage (per twitterId) so it also survives a full page refresh.
+let _hubCache = { twitterId: null, ownCredit: null, ipshare: null, buidlAmount: 0 };
+
+function loadHubCache(twitterId) {
+  try {
+    const raw = JSON.parse(localStorage.getItem("hubCache") || "null");
+    if (raw && raw.twitterId === twitterId) return raw;
+  } catch (_) { /* ignore */ }
+  return { twitterId, ownCredit: null, ipshare: null, buidlAmount: 0 };
+}
+
+function saveHubCache() {
+  try { localStorage.setItem("hubCache", JSON.stringify(_hubCache)); } catch (_) { /* ignore */ }
+}
 
 async function loadBuidlData() {
   const state = $("#apiState");
   try {
-    const [community, tweets, ipshares, ethPrice] = await Promise.all([
+    const [community, tweets, ipshares, credits, trades, ethPrice] = await Promise.all([
       apiGet("/community/detail", { tick: TICK }),
       apiGet("/curation/communityTweets", { tick: TICK, pages: 0 }),
       apiGet("/ipshare/list", { pages: 0 }),
+      apiGet("/community/communityCredits", { tick: TICK, pages: 0 }).catch(() => currentCredits),
+      apiGet("/community/getTokenTradeData", { tick: TICK, isNew: true }).catch(() => currentTrades),
       apiGet("/tiptag/getETHPrice").catch(() => bnbUsd)
     ]);
     bnbUsd = Number(ethPrice) || bnbUsd;
     applyCommunityData(community);
     applyIpshareData(ipshares);
+    currentCredits = Array.isArray(credits) ? credits : currentCredits;
+    currentTrades = Array.isArray(trades) ? trades : currentTrades;
     currentTweets = Array.isArray(tweets) && tweets.length ? tweets : [];
+    applyExploreNetworkMetrics(buildExploreNetworkMetrics({
+      community: currentCommunity,
+      tweets: currentTweets
+    }));
+    applyValueDiscoveryMetrics(currentTweets);
     renderTweets(currentTweets);
     // Note: do NOT re-trigger loadHubData here. renderRoute("/hub") is the single
     // authoritative hub trigger, and the hub fetches its own community/detail. A
     // second batch here raced the first and overwrote good data with degraded
     // responses (credit/reputation flickering correct↔wrong each load).
-    const tweetList = Array.isArray(tweets) ? tweets : [];
-    const tweetCount = tweetList.length;
-    $("#signalCount").textContent = formatNumber(tweetCount || 0);
-    $("#signalPosts").textContent = formatNumber(tweetCount || 0);
-    // Connections = total verifiable interactions across community signals
-    const connections = tweetList.reduce((sum, t) =>
-      sum + Number(t.replyCount || 0) + Number(t.retweetCount || 0) + Number(t.likeCount || 0) + Number(t.quoteCount || 0), 0);
-    $("#connectCount").textContent = formatNumber(connections);
     state.textContent = "live";
   } catch (error) {
     currentTweets = [];
     renderTweets(currentTweets);
     state.textContent = "offline";
+  }
+}
+
+async function refreshExploreNetworkMetrics() {
+  try {
+    const [community, tweets] = await Promise.all([
+      apiGet("/community/detail", { tick: TICK }).catch(() => currentCommunity),
+      apiGet("/curation/communityTweets", { tick: TICK, pages: 0 }).catch(() => currentTweets)
+    ]);
+    currentCommunity = community || currentCommunity;
+    currentTweets = Array.isArray(tweets) ? tweets : currentTweets;
+    applyExploreNetworkMetrics(buildExploreNetworkMetrics({
+      community: currentCommunity,
+      tweets: currentTweets
+    }));
+    applyValueDiscoveryMetrics(currentTweets);
+  } catch (_) { /* keep last-good values */ }
+}
+
+function renderActivityTicker() {
+  const typeEl = $("#activityType");
+  const actorEl = $("#activityActor");
+  const addressEl = $("#activityAddress");
+  if (!typeEl || !actorEl || !addressEl) return;
+  if (!communityActivities.length) {
+    typeEl.textContent = t("暂无动态", "No activity");
+    actorEl.textContent = "id name";
+    addressEl.textContent = "address";
+    return;
+  }
+  const activity = communityActivities[activityIndex % communityActivities.length];
+  const actorId = safeText(activity.actorId, "id");
+  const actorName = safeText(activity.actorName, actorId).replace(/^@/, "");
+  typeEl.textContent = translateActionType(activity.actionType);
+  actorEl.textContent = `@${actorName || actorId}`;
+  addressEl.textContent = activity.address ? compactAddress(String(activity.address)) : "address";
+  activityIndex = (activityIndex + 1) % communityActivities.length;
+}
+
+async function loadCommunityActivity() {
+  try {
+    const rows = await apiGet("/community/activity", { tick: TICK, limit: 30 });
+    communityActivities = Array.isArray(rows) ? rows : [];
+    activityIndex = 0;
+    renderActivityTicker();
+  } catch (_) {
+    renderActivityTicker();
   }
 }
 
@@ -666,13 +843,11 @@ async function connectWallet(providerDetail) {
   try {
     const accounts = await activeProvider.request({ method: "eth_requestAccounts" });
     connectedAddress = accounts?.[0] || "";
-    $("#walletAddress").textContent = connectedAddress ? `${providerDetail.info.name} · ${compactAddress(connectedAddress)}` : "id name   address";
     $("#walletMenu").hidden = true;
     renderAccountState();
     if (accountStore.isLoggedIn()) await bondConnectedWallet();
     activeProvider.on?.("accountsChanged", (nextAccounts) => {
       connectedAddress = nextAccounts?.[0] || "";
-      $("#walletAddress").textContent = connectedAddress ? compactAddress(connectedAddress) : "id name   address";
       renderAccountState();
     });
   } catch (error) {
@@ -725,11 +900,13 @@ function renderRoute(route) {
   const isSignal = route === "/signal";
   const isAgents = route === "/agents";
   const isEconomy = route === "/economy";
-  $("#homeView").hidden = isHub || isSignal || isAgents || isEconomy;
+  const isAtoc = route === "/atoc";
+  $("#homeView").hidden = isHub || isSignal || isAgents || isEconomy || isAtoc;
   $("#hubView").hidden = !isHub;
   $("#signalView").hidden = !isSignal;
   $("#agentsView").hidden = !isAgents;
   $("#economyView").hidden = !isEconomy;
+  $("#atocView").hidden = !isAtoc;
   document.querySelectorAll(".nav-links a").forEach((link) => {
     link.classList.toggle("is-active", link.getAttribute("data-route") === route);
   });
@@ -750,6 +927,11 @@ function renderRoute(route) {
     loadEconomyPage();
     setupEconomyTrade();
   }
+  if (isAtoc) {
+    if (_currentAtocData) renderAtoc(_currentAtocData);
+    loadAtocPage();
+  }
+  scheduleAlignHero();
 }
 
 function setupSignalControls() {
@@ -879,6 +1061,260 @@ function uniqueCount(rows, keyGetter) {
   return new Set(rows.map(keyGetter).filter(Boolean)).size;
 }
 
+// ======================== ATOC Agent ========================
+// Data comes from the ATOC dashboard (atocdashboard.tagclaw.com), proxied
+// same-origin via server.mjs at /atoc-data (no CORS upstream).
+
+let _atocLoadInFlight = false;
+let _currentAtocData = null;
+
+async function loadAtocPage() {
+  if (_atocLoadInFlight) return;
+  _atocLoadInFlight = true;
+  try {
+    let lastErr;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const res = await fetch("/atoc-data", { cache: "no-store" });
+        if (!res.ok) throw new Error(`atoc-data ${res.status}`);
+        renderAtoc(await res.json());
+        return;
+      } catch (e) {
+        lastErr = e;
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 1500));
+      }
+    }
+    throw lastErr;
+  } catch (error) {
+    $("#atocActions").innerHTML = `<div class="atoc-empty">${t("数据加载失败", "Data load failed")}: ${errorMessage(error, t("ATOC dashboard 不可达", "ATOC dashboard unreachable"))} <button class="atoc-retry" type="button" onclick="loadAtocPage()">${t("重试", "Retry")}</button></div>`;
+  } finally {
+    _atocLoadInFlight = false;
+  }
+}
+
+function atocTime(ts) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "—";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function renderAtoc(data = {}) {
+  _currentAtocData = data;
+  const wallet = data.overview?.wallet || {};
+  const market = data.ecosystem?.market || {};
+  const claimBuidl = Number(wallet.claimableRewards?.BUIDL || 0);
+  const claimable = t("可领取", "Claimable");
+  // Profile
+  if ($("#atocOp")) $("#atocOp").textContent = formatNumber(wallet.op ?? 0);
+  if ($("#atocVp")) $("#atocVp").textContent = formatNumber(wallet.vp ?? 0);
+  if ($("#atocBuidl")) {
+    $("#atocBuidl").textContent = formatNumber(claimBuidl);
+    const usd = claimBuidl * Number(market.spotPrice || 0);
+    $("#atocBuidl").nextElementSibling.textContent = usd ? `${claimable} · ${t("约", "approx.")} ${formatUsd(usd)}` : claimable;
+  }
+  if ($("#atocCredit")) {
+    $("#atocCredit").textContent = formatNumber(wallet.claimableTotal ?? 0);
+    $("#atocCredit").nextElementSibling.textContent = t("可领取奖励合计", "Total claimable rewards");
+  }
+  const addrEl = $("#atocAddr");
+  if (addrEl) addrEl.textContent = market.poolAddress ? compactAddress(market.poolAddress) : (data.workspace || "BUIDL-CTO");
+
+  // Agent status dots
+  const setDot = (id, status) => {
+    const el = $(id);
+    if (!el) return;
+    el.className = "atoc-dot" + (status?.status === "ok" ? " is-ok" : status?.status ? " is-warn" : "");
+    el.title = status?.summary || status?.status || "";
+  };
+  setDot("#atocStatusCore", data.agents?.core?.status);
+  setDot("#atocStatusOp", data.agents?.op?.status);
+  setDot("#atocStatusOnchain", data.agents?.onchain?.status);
+  setDot("#atocStatusGov", data.agents?.gov?.status);
+
+  renderAtocActions(data.activity?.recentActions || []);
+  renderAtocX(data.agents?.op?.topPosts || data.ecosystem?.community?.topPosts || []);
+  renderAtocOnchain(data.agents?.onchain || {});
+  renderAtocGov(data.agents?.gov || {});
+
+  // TAS charts
+  const history = Array.isArray(data.agents?.tasOs?.history) ? data.agents.tasOs.history : [];
+  const hl = data.headline || {};
+  if ($("#atocTasTotal")) $("#atocTasTotal").textContent = Number(hl.tasTotal || 0).toFixed(4);
+  if ($("#atocTasSocial")) $("#atocTasSocial").textContent = Number(hl.tasSocial || 0).toFixed(4);
+  if ($("#atocTasEconomic")) $("#atocTasEconomic").textContent = Number(hl.tasEconomic || 0).toFixed(4);
+  drawAtocLine("#atocChartTotal", history.map((h) => Number(h.tasTotal || 0)), "#2b8a3e");
+  drawAtocLine("#atocChartSocial", history.map((h) => Number(h.tasSocial || 0)), "#1971c2");
+  drawAtocLine("#atocChartEconomic", history.map((h) => Number(h.tasEconomic || 0)), "#e8590c");
+
+  renderAtocOoda(data.agents?.tasOs?.ooda || {});
+  renderAtocBudget(data.agents?.tasOs?.budgetDirective || {});
+  renderAtocHistory(history);
+  renderAtocWiki(data.wiki || {});
+}
+
+function renderAtocActions(actions) {
+  const el = $("#atocActions");
+  if (!el) return;
+  if (!actions.length) { el.innerHTML = `<div class="atoc-empty">${t("暂无操作", "No actions yet")}</div>`; return; }
+  el.innerHTML = actions.slice(0, 8).map((a) => {
+    const vp = a.vp != null ? `VP ${Number(a.vp).toFixed(2)}` : "";
+    const op = a.opCost != null ? `OP ${Number(a.opCost).toFixed(2)}` : "";
+    const detail = safeText(a.reason || a.tweetId || a.replyId || a.postId || "", "—");
+    return `<div class="atoc-act-row${a.success === false ? " is-fail" : ""}">
+      <span class="atoc-act-time">${atocTime(a.timestamp)}</span>
+      <span class="atoc-act-op">op</span>
+      <span class="atoc-act-kind">${safeText(a.action || a.kind, "—")}</span>
+      <span class="atoc-act-vp">${vp}${op ? `<br><b>${op}</b>` : ""}</span>
+      <span class="atoc-act-detail">${detail}</span>
+    </div>`;
+  }).join("");
+}
+
+function renderAtocX(posts) {
+  const el = $("#atocXActivity");
+  if (!el) return;
+  if (!posts.length) { el.innerHTML = `<div class="atoc-empty">${t("暂无 X 活动", "No X activity")}</div>`; return; }
+  el.innerHTML = posts.slice(0, 5).map((p) => `
+    <article class="atoc-x-post">
+      <div class="atoc-x-head"><strong>${safeText(p.twitterName, "Agent")}</strong><small>@${safeText(p.twitterUsername, "agent")}</small><span class="atoc-x-credit">${formatNumber(p.credit || 0)}</span></div>
+      <p>${safeText(p.contentPreview, "")}</p>
+      <footer>♥ ${p.likeCount || 0} · ↻ ${p.retweetCount || 0} · 💬 ${p.replyCount || 0} · ❝ ${p.quoteCount || 0}</footer>
+    </article>`).join("");
+}
+
+function renderAtocOnchain(onchain) {
+  const liq = $("#atocLiquidity");
+  if (!liq) return;
+  const ex = onchain.execution || {};
+  const mode = ex.mode || onchain.status?.status || "—";
+  const ctx = ex.decisionContext || {};
+  liq.innerHTML = `
+    <div class="atoc-kv"><label>${t("模式", "Mode")}</label><span>${safeText(mode, "—")}</span></div>
+    <div class="atoc-kv"><label>${t("可领取合计", "Claimable Total")}</label><strong>${formatNumber(ctx.claimableTotal ?? 0)}</strong></div>
+    <div class="atoc-kv"><label>TAS_economic</label><span>${Number(ctx.tasEconomic || 0).toFixed(4)}</span></div>
+    <div class="atoc-kv"><label>${t("覆盖", "Coverage")}</label><span>${safeText(ctx.coverage, "—")}</span></div>
+    <p class="atoc-note">${safeText(ex.operatorSummary, onchain.signal?.summary || t("暂无近期流动性操作", "No recent liquidity operations"))}</p>`;
+}
+
+function renderAtocGov(gov) {
+  const adjust = $("#atocGovAdjust");
+  if (adjust) {
+    const delta = gov.delta || {};
+    adjust.innerHTML = `
+      <div class="atoc-kv"><label>${t("变更", "Changes")}</label><span>${delta.changeCount ?? 0} ${t("项", "items")}</span></div>
+      <p class="atoc-note">${safeText(delta.summary || gov.note, t("近期无代币分发 / 声誉调整", "No recent token distribution / reputation adjustments"))}</p>`;
+  }
+  const list = $("#atocGovList");
+  if (list) {
+    const proposals = Array.isArray(gov.proposals) ? gov.proposals : [];
+    list.innerHTML = proposals.length
+      ? proposals.slice(0, 5).map((p) => `
+        <div class="atoc-gov-item">
+          <div><strong>${safeText(p.title || p.name, "proposal")}</strong><span class="atoc-tag-pill">${safeText(p.status, "—")}</span></div>
+          <p class="atoc-note">${safeText(p.summary, "")}</p>
+        </div>`).join("")
+      : `<div class="atoc-empty">${t("暂无治理提案", "No governance proposals")}</div>`;
+  }
+}
+
+function renderAtocOoda(ooda) {
+  const badge = $("#atocOodaBadge");
+  if (badge) {
+    badge.textContent = safeText(ooda.posture, "—");
+    badge.className = "atoc-badge" + (ooda.posture === "degraded" ? " is-warn" : ooda.posture ? " is-ok" : "");
+  }
+  const el = $("#atocOodaCycle");
+  if (!el) return;
+  el.innerHTML = `
+    <h4>OODA LAST CYCLE</h4>
+    <div class="atoc-kv"><label>HEALTH</label><strong>${Number(ooda.healthScore || 0).toFixed(3)}</strong></div>
+    <div class="atoc-kv"><label>VERDICT</label><span>${safeText(ooda.verdict, "—")}</span></div>
+    <div class="atoc-kv"><label>ISSUES</label><span>${ooda.issueCount ?? 0}</span></div>
+    <ul class="atoc-issues">${(ooda.issues || []).slice(0, 3).map((i) => `<li>${safeText(i, "")}</li>`).join("")}</ul>`;
+}
+
+function renderAtocBudget(bd) {
+  const el = $("#atocBudget");
+  if (!el) return;
+  const dir = bd.trend?.trends?.total?.direction || "—";
+  el.innerHTML = `
+    <h4>BUDGET DIRECTIVE</h4>
+    <div class="atoc-kv"><label>CURRENT TAS</label><strong>${Number(bd.currentTAS || 0).toFixed(4)}</strong></div>
+    <div class="atoc-kv"><label>TARGET TAS</label><strong>${Number(bd.targetTAS || 0).toFixed(4)}</strong></div>
+    <div class="atoc-kv"><label>TREND</label><span>${safeText(dir, "—")}</span></div>
+    <p class="atoc-note">${safeText(bd.trend?.trends?.total?.component, "")} slope ${Number(bd.trend?.trends?.total?.slope || 0).toFixed(4)}</p>`;
+}
+
+function renderAtocHistory(history) {
+  const el = $("#atocTasHistory");
+  if (!el) return;
+  const rows = history.slice(-6).reverse();
+  el.innerHTML = `<h4>TAS &amp; HISTORY</h4>` + (rows.length
+    ? rows.map((h) => {
+      const d = Number(h.delta || 0);
+      return `<div class="atoc-hist-row"><span>${atocTime(h.timestamp)}</span><strong>${Number(h.tasTotal || 0).toFixed(4)}</strong><em class="${d >= 0 ? "t-up" : "t-down"}">${d >= 0 ? "+" : ""}${d.toFixed(4)}</em></div>`;
+    }).join("")
+    : `<div class="atoc-empty">—</div>`);
+}
+
+function renderAtocWiki(wiki) {
+  const fresh = $("#atocWikiFresh");
+  if (fresh) fresh.textContent = wiki.indexSummary?.freshness || wiki.freshness || "—";
+  const el = $("#atocWiki");
+  if (!el) return;
+  const idx = wiki.indexSummary || {};
+  const arch = wiki.architecture || {};
+  const flow = Array.isArray(arch.dataFlow) ? arch.dataFlow : [];
+  el.innerHTML = `
+    <div class="atoc-wiki-card">
+      <h4>DATA LAYER OVERVIEW</h4>
+      <div class="atoc-kv"><label>${t("可用", "Available")}</label><span>${wiki.available ? t("是", "Yes") : t("否", "No")}</span></div>
+      <div class="atoc-kv"><label>${t("新鲜度", "Freshness")}</label><span>${safeText(wiki.freshness, "—")} (${Number(wiki.ageHours || 0).toFixed(1)}h)</span></div>
+      <div class="atoc-kv"><label>VP</label><span>${formatNumber(idx.vpCurrent ?? 0)} (gap ${formatNumber(idx.vpGap ?? 0)}/${idx.vp24hTarget ?? 0})</span></div>
+      <div class="atoc-kv"><label>OP</label><span>${formatNumber(idx.opCurrent ?? 0)} (target ${idx.op24hTarget ?? 0})</span></div>
+      <div class="atoc-kv"><label>${t("未策展", "Uncurated")}</label><span>${wiki.uncuratedCount ?? 0}</span></div>
+    </div>
+    <div class="atoc-wiki-card">
+      <h4>${safeText(arch.description, "ATOC LLM WIKI")}</h4>
+      <ol class="atoc-flow-list">${flow.slice(0, 6).map((f) => `<li>${safeText(f, "")}</li>`).join("")}</ol>
+    </div>
+    <div class="atoc-wiki-card">
+      <h4>TAS SUMMARY</h4>
+      <p class="atoc-note">${safeText(idx.tasSummary, "—")}</p>
+    </div>`;
+}
+
+function drawAtocLine(selector, values, color) {
+  const canvas = $(selector);
+  if (!canvas || !canvas.getContext) return;
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width;
+  const H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  const pad = 14;
+  const data = (values || []).filter((v) => Number.isFinite(v));
+  if (data.length < 2) return;
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+  const x = (i) => pad + (i / (data.length - 1)) * (W - pad * 2);
+  const y = (v) => H - pad - ((v - min) / range) * (H - pad * 2);
+  // baseline grid
+  ctx.strokeStyle = "rgba(0,0,0,0.12)";
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(pad, H - pad); ctx.lineTo(W - pad, H - pad); ctx.stroke();
+  // line
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  data.forEach((v, i) => { i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v)); });
+  ctx.stroke();
+  // dots
+  ctx.fillStyle = color;
+  data.forEach((v, i) => { ctx.beginPath(); ctx.arc(x(i), y(v), 2, 0, Math.PI * 2); ctx.fill(); });
+}
+
 async function loadEconomyPage() {
   try {
     const [community, tweets, trending, ipshares, credits, trades, ethPrice] = await Promise.all([
@@ -943,19 +1379,15 @@ function renderEconomyPreview(extra = {}) {
 
   $("#ecoAgentCount").textContent = formatNumber(aiAgents.length || 0);
   $("#ecoSignalMiners").textContent = formatNumber(signalMiners);
-  $("#ecoGameMiners").textContent = "0";
   $("#ecoSocialMiners").textContent = formatNumber(socialMiners);
   $("#ecoVolume").textContent = formatVolume(volume);
   $("#ecoDistributed").textContent = formatNumber(distributed);
-  $("#ecoStaked").textContent = "0";
   $("#ecoKnowledge").textContent = formatNumber(knowledge);
 
-  const mcapBnb = Number(currentCommunity?.marketCap || 0);
-  $("#ecoBuidlPrice").textContent = `${formatNumber(mcapBnb * bnbUsd)} USDT`;
+  $("#ecoBuidlPrice").textContent = formatUsd(getBuidlFdvUsd());
 
   drawTradeCanvas();
   drawMiningRewardCanvas();
-  drawStakeChangeCanvas();
   drawMiniNetworks();
 }
 
@@ -1083,20 +1515,6 @@ function drawMiningRewardCanvas() {
   const rows = getDistributionRows();
   const values = (rows.length ? rows.slice(-12).map((row) => Number(row.amount || 0) * 86400) : Array.from({ length: 12 }, (_, i) => reward * (0.75 + (i % 5) * 0.06)));
   drawBarChart($("#miningRewardCanvas"), values, { footer: `Highest ${formatNumber(Math.max(...values))} · Latest ${formatNumber(values.at(-1) || reward)} · Reward per day` });
-}
-
-function drawStakeChangeCanvas() {
-  const canvas = $("#stakeChangeCanvas");
-  if (!canvas) return;
-  const ctx = canvas.getContext("2d");
-  const w = canvas.width;
-  const h = canvas.height;
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = "#fbf8ef";
-  ctx.fillRect(0, 0, w, h);
-  ctx.fillStyle = "#999";
-  ctx.font = "14px system-ui";
-  ctx.fillText("$BUIDL 质押功能待创建 — 当前质押数为 0", w / 2 - 140, h / 2);
 }
 
 function drawMiniNetworks() {
@@ -1262,27 +1680,81 @@ function setupPredictionTabs() {
   });
 }
 
+// VP economics (mirrors tagai-ui src/config.ts).
+const PREDICT_VOTE_COST = 10;
+const PREDICT_MAX_VP = 200;
+const PREDICT_VP_RECOVER_DAY = 3;
+
+// Live event-prediction state: the events currently rendered (keyed by marketMaker)
+// plus the pending vote being confirmed in the modal.
+const predictionEventState = {
+  events: new Map(),
+  pending: null // { marketMaker, choice: 'yes'|'no' }
+};
+
 async function loadPredictionData(tab) {
   const list = $("#predictionList");
   if (!list) return;
-  list.innerHTML = `<div class="prediction-loading">Loading...</div>`;
+  list.innerHTML = `<div class="prediction-loading">${t("加载中…", "Loading…")}</div>`;
 
+  const twitterId = accountStore.getAccount()?.twitterId || undefined;
   try {
     if (tab === "battle") {
-      const data = await apiGet("/predict/getPredictBattleData", { tick: TICK, pageIndex: 0 });
+      const data = await apiGet("/predict/getPredictBattleData", { tick: TICK, twitterId, pageIndex: 0 });
       const battles = data?.battle || [];
       const tweets = data?.tweets || {};
       await attachMarketReserves(battles);
       renderPredictionBattles(battles, tweets);
     } else {
-      const events = await apiGet("/predict/getPredictEventData", { tick: TICK, pageIndex: 0 });
+      const events = await apiGet("/predict/getPredictEventData", { tick: TICK, twitterId, pageIndex: 0 });
       const list = Array.isArray(events) ? events : [];
       await attachMarketReserves(list);
+      predictionEventState.events = new Map(list.map((e) => [String(e.marketMaker), e]));
       renderPredictionEvents(list);
     }
   } catch (error) {
-    list.innerHTML = `<div class="prediction-empty">Failed to load prediction data.</div>`;
+    list.innerHTML = `<div class="prediction-empty">${t("预测数据加载失败。", "Failed to load prediction data.")}</div>`;
   }
+}
+
+// Event lifecycle (mirrors tagai-ui PredictHeader.vue):
+//  - trading phase:  now < endTime
+//  - voting phase:   status === 2 && endTime <= now < endTime + 24h
+//  - ended/settled:  winner set, or now >= endTime + 24h
+function eventPhase(event) {
+  const now = Date.now();
+  const tradeEnd = Number(event.endTime || 0) * 1000;
+  const voteEnd = tradeEnd + 86400000;
+  if (event.winner || event.status === 3) return "ended";
+  if (event.status === 2 && tradeEnd <= now && now < voteEnd) return "voting";
+  if (now >= voteEnd) return "ended";
+  if (now < tradeEnd) return "trading";
+  return "ended";
+}
+
+function eventPhaseLabel(event) {
+  const phase = eventPhase(event);
+  const now = Date.now();
+  const tradeEnd = Number(event.endTime || 0) * 1000;
+  const voteEnd = tradeEnd + 86400000;
+  if (phase === "voting") return `${t("投票中 · 剩余 ", "Voting · ")}${formatDuration(voteEnd - now)}`;
+  if (phase === "trading") return `${t("交易中 · 剩余 ", "Trading · ")}${formatDuration(tradeEnd - now)}`;
+  return t("已结束", "Ended");
+}
+
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "0h";
+  const totalMin = Math.floor(ms / 60000);
+  const d = Math.floor(totalMin / 1440);
+  const h = Math.floor((totalMin % 1440) / 60);
+  const m = totalMin % 60;
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+function hasVoted(event) {
+  return event.voteResult !== null && event.voteResult !== undefined && event.voteResult !== 0;
 }
 
 function predictionStatusLabel(status) {
@@ -1354,47 +1826,241 @@ function renderPredictionEvents(events) {
   const list = $("#predictionList");
   if (!list) return;
   if (!events.length) {
-    list.innerHTML = `<div class="prediction-empty">No prediction events in #BUIDL yet.</div>`;
+    list.innerHTML = `<div class="prediction-empty">${t("#BUIDL 暂无预测事件。", "No prediction events in #BUIDL yet.")}</div>`;
     return;
   }
 
   list.innerHTML = "";
   events.forEach((event) => {
-    const { pctA: pctYes, pctB: pctNo } = marketPercents(event);
+    const marketMaker = String(event.marketMaker || "");
+    // Trading-phase odds come from on-chain reserves; voting-phase tallies come
+    // from the community vote volume (voteYes / voteNo).
+    const phase = eventPhase(event);
+    const voteYes = Number(event.voteYes || 0);
+    const voteNo = Number(event.voteNo || 0);
+    const voteTotal = voteYes + voteNo;
+    let pctYes;
+    let pctNo;
+    if (voteTotal > 0) {
+      pctYes = Math.round((voteYes / voteTotal) * 100);
+      pctNo = 100 - pctYes;
+    } else {
+      const odds = marketPercents(event);
+      pctYes = odds.pctA;
+      pctNo = odds.pctB;
+    }
     const poolReserve = Number(event.reserveA || 0) + Number(event.reserveB || 0);
-    const endDate = event.endTime ? new Date(event.endTime * 1000).toLocaleDateString() : "—";
+    const endDate = event.endTime ? new Date(event.endTime * 1000).toLocaleString() : "—";
+    const voted = hasVoted(event);
+    const canVote = phase === "voting";
+    const detailUrl = `https://tagai.fun/predict-event-detail/${marketMaker}`;
+
+    const yesTag = event.voteResult === 1 ? `<span class="vote-mark">✓ ${t("你的选择", "Your pick")}</span>` : "";
+    const noTag = event.voteResult === 2 ? `<span class="vote-mark">✓ ${t("你的选择", "Your pick")}</span>` : "";
+
+    // Voting controls: live buttons during the voting phase, otherwise a static
+    // odds display. A vote requires Twitter login (handled in handleVoteClick).
+    const voteControls = canVote
+      ? `
+        <div class="prediction-vote-actions">
+          <button class="vote-btn vote-btn-yes${event.voteResult === 1 ? " is-picked" : ""}" data-vote="yes" data-market="${marketMaker}" ${voted ? "disabled" : ""}>
+            ${t("投 Yes", "Vote Yes")} <small>${pctYes}%</small> ${yesTag}
+          </button>
+          <button class="vote-btn vote-btn-no${event.voteResult === 2 ? " is-picked" : ""}" data-vote="no" data-market="${marketMaker}" ${voted ? "disabled" : ""}>
+            ${t("投 No", "Vote No")} <small>${pctNo}%</small> ${noTag}
+          </button>
+        </div>
+        ${voted ? `<p class="prediction-voted-note">${t("你已投票，等待结算后领取奖励。", "You've voted. Rewards unlock after settlement.")}</p>` : ""}`
+      : `
+        <div class="prediction-votes">
+          <div class="prediction-vote-yes"><strong>Yes</strong><span>${pctYes}%</span>${yesTag}</div>
+          <div class="prediction-vote-no"><strong>No</strong><span>${pctNo}%</span>${noTag}</div>
+        </div>`;
 
     const card = document.createElement("article");
     card.className = "prediction-card";
     card.innerHTML = `
       <div class="prediction-card-header">
-        <h3>${safeText(event.title, "Prediction Event")}</h3>
-        <span class="prediction-status ${predictionStatusClass(event.status)}">${predictionStatusLabel(event.status)}</span>
+        <h3>${safeText(event.title, t("预测事件", "Prediction Event"))}</h3>
+        <span class="prediction-status ${predictionStatusClass(event.status)}">${eventPhaseLabel(event)}</span>
       </div>
       <div class="prediction-event-body">
-        <p class="prediction-event-content">${safeText(event.content, "").slice(0, 200)}</p>
-        <div class="prediction-votes">
-          <div class="prediction-vote-yes">
-            <strong>Yes</strong>
-            <span>${pctYes}%</span>
-          </div>
-          <div class="prediction-vote-no">
-            <strong>No</strong>
-            <span>${pctNo}%</span>
-          </div>
-        </div>
+        <p class="prediction-event-content">${safeText(event.content, "").slice(0, 220)}</p>
+        ${voteControls}
       </div>
       <div class="prediction-bar">
         <div class="prediction-bar-a" style="width:${pctYes}%"></div>
         <div class="prediction-bar-b" style="width:${pctNo}%"></div>
       </div>
       <div class="prediction-card-footer">
-        <span>Ends: ${endDate}</span>
-        <span>Pool: ${formatNumber(poolReserve)} $${safeText(event.tick, TICK)}</span>
+        <span>${t("结束", "Ends")}: ${endDate}</span>
+        <span class="prediction-meta-right">
+          ${voteTotal > 0 ? `${t("投票量", "Votes")}: ${formatNumber(voteTotal)} VP · ` : ""}${t("资金池", "Pool")}: ${formatNumber(poolReserve)} $${safeText(event.tick, TICK)}
+          <a class="prediction-detail-link" href="${detailUrl}" target="_blank" rel="noopener noreferrer">${t("详情 ↗", "Detail ↗")}</a>
+        </span>
       </div>
     `;
     list.appendChild(card);
   });
+
+  // Wire up the live vote buttons.
+  list.querySelectorAll(".vote-btn[data-vote]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      handleVoteClick(btn.getAttribute("data-market"), btn.getAttribute("data-vote"));
+    });
+  });
+}
+
+// ======================== Event Prediction Voting ========================
+// Mirrors tagai-ui PredictHeader.vue: a logged-in user spends VP to vote YES/NO
+// on an event's outcome via POST /predict/voteEventPrediction. Live tallies and a
+// "you voted" marker provide immediate feedback; the same data is on tagai.fun.
+
+// Compute the user's currently available VP (it recovers linearly over time),
+// matching the formula in tagai-ui's useCommunityMember / PredictHeader.
+async function fetchUserPredictVP() {
+  const account = accountStore.getAccount();
+  if (!account?.twitterId) return PREDICT_MAX_VP;
+  try {
+    const info = await apiGet("/predict/getUserPredictVP", { twitterId: account.twitterId, tick: TICK });
+    if (info && typeof info === "object" && "lastUpdateVPStamp" in info && "predictVP" in info) {
+      if (!info.lastUpdateVPStamp || Number(info.lastUpdateVPStamp) === 0) return PREDICT_MAX_VP;
+      const recovered = Number(info.predictVP) + (Date.now() - Number(info.lastUpdateVPStamp)) * PREDICT_MAX_VP / (86400000 * PREDICT_VP_RECOVER_DAY);
+      return Math.floor(Math.min(recovered, PREDICT_MAX_VP));
+    }
+  } catch (_) { /* default below */ }
+  return PREDICT_MAX_VP;
+}
+
+async function handleVoteClick(marketMaker, choice) {
+  const event = predictionEventState.events.get(String(marketMaker));
+  if (!event) return;
+
+  // Must be logged in to vote — reuse the existing TagAI/Privy account modal.
+  if (!accountStore.isLoggedIn()) {
+    showToast(t("请先登录后再投票。", "Please log in to vote."), "warn");
+    openAccountModal();
+    return;
+  }
+  if (hasVoted(event)) {
+    showToast(t("你已经为该事件投过票了。", "You already voted on this event."), "warn");
+    return;
+  }
+
+  predictionEventState.pending = { marketMaker: String(marketMaker), choice };
+  openVoteModal(event, choice);
+
+  // Load the user's VP in the background and update the modal.
+  $("#voteModalRemain").textContent = "…";
+  const vp = await fetchUserPredictVP();
+  $("#voteModalRemain").textContent = formatNumber(vp);
+  const confirm = $("#voteModalConfirm");
+  if (vp < PREDICT_VOTE_COST) {
+    confirm.disabled = true;
+    setVoteModalStatus(t("VP 不足，无法投票。", "Insufficient VP to vote."), "error");
+  } else {
+    confirm.disabled = false;
+    setVoteModalStatus("", "");
+  }
+}
+
+function openVoteModal(event, choice) {
+  $("#voteModalTitle").textContent = safeText(event.title, "");
+  $("#voteModalChoice").textContent = choice === "yes"
+    ? t("你选择：Yes", "Your choice: Yes")
+    : t("你选择：No", "Your choice: No");
+  $("#voteModalCost").textContent = String(PREDICT_VOTE_COST);
+  $("#voteModalRemain").textContent = "—";
+  setVoteModalStatus("", "");
+  $("#voteModalConfirm").disabled = false;
+  $("#voteModal").hidden = false;
+}
+
+function closeVoteModal() {
+  $("#voteModal").hidden = true;
+  predictionEventState.pending = null;
+}
+
+function setVoteModalStatus(message, kind) {
+  const el = $("#voteModalStatus");
+  if (!el) return;
+  el.textContent = message || "";
+  el.className = "account-status" + (kind ? ` is-${kind}` : "");
+}
+
+// Map backend vote error codes (config/code.js) to readable messages.
+function voteErrorMessage(error) {
+  const msg = errorMessage(error, "");
+  const map = {
+    "User not registered steem": t("请先在 tagai.fun 完成社交账户注册后再投票。", "Register your social account on tagai.fun before voting."),
+    "Market not in voting period": t("该事件当前不在投票阶段。", "This event is not in the voting period."),
+    "User already voted": t("你已经为该事件投过票了。", "You already voted on this event."),
+    "Insufficient vp": t("VP 不足，无法投票。", "Insufficient VP to vote."),
+    "Execute failed": t("投票执行失败，请稍后重试。", "Vote failed, please try again.")
+  };
+  return map[msg] || msg || t("投票失败。", "Vote failed.");
+}
+
+async function confirmVote() {
+  const pending = predictionEventState.pending;
+  const account = accountStore.getAccount();
+  if (!pending || !account?.twitterId) return;
+  const confirm = $("#voteModalConfirm");
+  confirm.disabled = true;
+  setVoteModalStatus(t("投票提交中…", "Submitting vote…"), "");
+
+  const voteResult = pending.choice === "yes" ? 1 : 2;
+  try {
+    await apiPost("/predict/voteEventPrediction", {
+      twitterId: account.twitterId,
+      marketAddr: pending.marketMaker,
+      voteResult,
+      voteVp: PREDICT_VOTE_COST
+    });
+    // Optimistically reflect the vote locally so feedback is immediate.
+    const event = predictionEventState.events.get(pending.marketMaker);
+    if (event) {
+      event.voteResult = voteResult;
+      if (voteResult === 1) event.voteYes = Number(event.voteYes || 0) + PREDICT_VOTE_COST;
+      else event.voteNo = Number(event.voteNo || 0) + PREDICT_VOTE_COST;
+    }
+    closeVoteModal();
+    showToast(t("投票成功！", "Vote submitted!"), "success");
+    // Re-fetch authoritative tallies from the API.
+    loadPredictionData("event");
+  } catch (error) {
+    setVoteModalStatus(voteErrorMessage(error), "error");
+    confirm.disabled = false;
+  }
+}
+
+function setupVoteModalControls() {
+  $("#voteModalClose")?.addEventListener("click", closeVoteModal);
+  $("#voteModal")?.addEventListener("click", (event) => {
+    if (event.target.id === "voteModal") closeVoteModal();
+  });
+  $("#voteModalConfirm")?.addEventListener("click", confirmVote);
+}
+
+// ======================== Toast ========================
+let toastTimer = null;
+function showToast(message, kind = "info") {
+  const host = $("#toastHost");
+  if (!host) {
+    // Fallback for environments without the toast host.
+    setAccountStatus(message);
+    return;
+  }
+  const el = document.createElement("div");
+  el.className = `toast toast-${kind}`;
+  el.textContent = message;
+  host.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("is-visible"));
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    el.classList.remove("is-visible");
+    setTimeout(() => el.remove(), 300);
+  }, 3200);
 }
 
 // ---- Prediction odds from the on-chain FPMM (matches tagai-ui usePredict) ----
@@ -2433,7 +3099,7 @@ function renderHubPreview(model = {}) {
   }
   $("#hubName").textContent = displayName(user, "—");
   $("#hubHandle").textContent = user.twitterUsername ? `@${user.twitterUsername}` : connectedAddress ? compactAddress(connectedAddress) : user.ethAddr ? compactAddress(user.ethAddr) : "—";
-  $("#hubSocial").textContent = `${formatNumber(social.posts ?? tweetCount)} 条帖子 · ${formatNumber(social.followings ?? user.followings ?? 0)} 位 Following · ${formatNumber(social.followers ?? user.followers ?? 0)} 位 Followers`;
+  $("#hubSocial").textContent = `${formatNumber(social.posts ?? tweetCount)} ${t("条帖子", "posts")} · ${formatNumber(social.followings ?? user.followings ?? 0)} ${t("关注", "Following")} · ${formatNumber(social.followers ?? user.followers ?? 0)} ${t("粉丝", "Followers")}`;
   const opValue = Number(model.op ?? user.op ?? 0);
   const vpValue = Number(model.vp ?? user.vp ?? 0);
   if ($("#hubOp")) $("#hubOp").textContent = formatNumber(opValue);
@@ -2441,7 +3107,7 @@ function renderHubPreview(model = {}) {
   $("#hubBuidl").textContent = formatNumber(buidlAmount);
   $("#hubBuidl").nextElementSibling.textContent = buidlUsd ? `约 ${formatUsd(buidlUsd)}` : "—";
   $("#hubCredit").textContent = formatNumber(credit);
-  $("#hubCredit").nextElementSibling.textContent = `${formatNumber(model.signalHits ?? 0)}信号命中`;
+  $("#hubCredit").nextElementSibling.textContent = `${formatNumber(model.signalHits ?? 0)}${t("信号命中", " signal hits")}`;
 
   const ipshareSubject = model.ipshare?.ethAddr || user.ethAddr || connectedAddress || "";
   const rawSupply = Number(
@@ -2463,8 +3129,8 @@ function renderHubPreview(model = {}) {
   const miningTotal = Number(model.signalReward || 0) + Number(model.voteReward || 0);
   const miningCaption = $("#hubMiningCaption");
   const proofCaption = $("#hubProofCaption");
-  if (miningCaption) miningCaption.textContent = `7天 · ${formatNumber(miningTotal)} $BUIDL`;
-  if (proofCaption) proofCaption.textContent = `7天 · ${formatNumber(weeklyReward)} $BUIDL`;
+  if (miningCaption) miningCaption.textContent = `${t("7天", "7d")} · ${formatNumber(miningTotal)} $BUIDL`;
+  if (proofCaption) proofCaption.textContent = `${t("7天", "7d")} · ${formatNumber(weeklyReward)} $BUIDL`;
 
   const signalValue = model.requiresLogin ? 0 : (model.buidlPostsLast7d ?? tweetCount);
 
@@ -2482,33 +3148,38 @@ function renderHubPreview(model = {}) {
     cfEconomy = Number(cf[0] || 0) + Number(cf[1] || 0) + Number(cf[2] || 0) + Number(cf[5] || 0) + Number(cf[6] || 0);
   }
 
+  const L = {
+    signal: t("信号发布", "Signal Posts"), trade: t("社交交易", "Social Trades"),
+    vote: t("验证投票", "Validation Votes"), economy: t("社区经济参与", "Community Economy"),
+    like: t("点赞", "Likes"), reply: t("评论", "Replies"), retweet: t("转发", "Reposts")
+  };
   buildScoreRows("#reputationMetrics", [
     { label: "IPShare", value: formatNumber(cfIpshare), rawValue: cfIpshare },
-    { label: "信号发布", value: 0 },
-    { label: "社交交易", value: 0 },
-    { label: "验证投票", value: 0 },
-    { label: "社区经济参与", value: formatNumber(cfEconomy), rawValue: cfEconomy }
+    { label: L.signal, value: 0 },
+    { label: L.trade, value: 0 },
+    { label: L.vote, value: 0 },
+    { label: L.economy, value: formatNumber(cfEconomy), rawValue: cfEconomy }
   ]);
   buildScoreRows("#actionTrace", [
-    { label: "信号发布", value: signalValue },
-    { label: "社交交易", value: model.blinksCount ?? 0 },
-    { label: "验证投票", value: model.voteCount ?? 0 },
-    { label: "点赞", value: model.likeCount ?? 0 },
-    { label: "评论", value: model.replyCount ?? 0 },
-    { label: "转发", value: model.retweetCount ?? 0 }
+    { label: L.signal, value: signalValue },
+    { label: L.trade, value: model.blinksCount ?? 0 },
+    { label: L.vote, value: model.voteCount ?? 0 },
+    { label: L.like, value: model.likeCount ?? 0 },
+    { label: L.reply, value: model.replyCount ?? 0 },
+    { label: L.retweet, value: model.retweetCount ?? 0 }
   ]);
   buildScoreRows("#miningRewards", [
-    { label: "信号发布", value: formatNumber(model.signalReward ?? 0), rawValue: model.signalReward ?? 0 },
-    { label: "验证投票", value: formatNumber(model.voteReward ?? 0), rawValue: model.voteReward ?? 0 }
+    { label: L.signal, value: formatNumber(model.signalReward ?? 0), rawValue: model.signalReward ?? 0 },
+    { label: L.vote, value: formatNumber(model.voteReward ?? 0), rawValue: model.voteReward ?? 0 }
   ]);
   buildScoreRows("#proofMetrics", [
-    { label: "信号发布", value: signalValue },
-    { label: "社交交易", value: model.blinksCount ?? 0 },
-    { label: "验证投票", value: model.voteCount ?? 0 }
+    { label: L.signal, value: signalValue },
+    { label: L.trade, value: model.blinksCount ?? 0 },
+    { label: L.vote, value: model.voteCount ?? 0 }
   ]);
   if (model.requiresLogin) {
-    $("#hubRecentSignals").innerHTML = `<article class="mini-post"><strong>Login required</strong><p>Hub 只展示当前 TagAI accountInfo 的个人信号数据。</p><footer>Privy Twitter / Email</footer></article>`;
-    $("#hubRecentVotes").innerHTML = `<article class="mini-post"><strong>Login required</strong><p>验证投票和互动数据需要 AccessToken + twitterId。</p><footer>checkTwitterAuth</footer></article>`;
+    $("#hubRecentSignals").innerHTML = `<article class="mini-post"><strong>${t("需要登录", "Login required")}</strong><p>${t("Hub 只展示当前 TagAI accountInfo 的个人信号数据。", "The hub only shows the personal signal data of the current TagAI accountInfo.")}</p><footer>Privy Twitter / Email</footer></article>`;
+    $("#hubRecentVotes").innerHTML = `<article class="mini-post"><strong>${t("需要登录", "Login required")}</strong><p>${t("验证投票和互动数据需要 AccessToken + twitterId。", "Validation votes and interactions require an AccessToken + twitterId.")}</p><footer>checkTwitterAuth</footer></article>`;
   } else {
     renderMiniFeed("#hubRecentSignals", tweets, "signal");
     renderMiniFeed("#hubRecentVotes", model.votes || tweets.slice().reverse(), "vote");
@@ -2527,9 +3198,9 @@ async function loadHubData(opts = {}) {
   if (!account?.twitterId) {
     hubRewardSeries = buildThirtyDaySeries([]);
     const chartCaption = $("#chartCaption");
-    if (chartCaption) chartCaption.textContent = "过去30天收益为 0 $BUIDL";
+    if (chartCaption) chartCaption.textContent = t("过去30天收益为 0 $BUIDL", "30-day rewards: 0 $BUIDL");
     renderHubPreview({
-      user: { twitterName: "请登录 TagAI 账户", twitterUsername: "connect" },
+      user: { twitterName: t("请登录 TagAI 账户", "Sign in to TagAI"), twitterUsername: "connect" },
       tweets: [],
       credit: 0,
       buidlAmount: 0,
@@ -2554,13 +3225,16 @@ async function loadHubData(opts = {}) {
   const twitterId = account?.twitterId;
   const username = account?.twitterUsername;
 
+  // Restore last-good cache (survives full refresh) so a failing reload never shows 0.
+  if (_hubCache.twitterId !== twitterId) _hubCache = loadHubCache(twitterId);
+
   const [, credits, communityTweets, profile, userTweets, userBlinks, rewards, unclaimed, dailyRewards, ipshare, kolFee, capturedFee, holdingList, vpop, ipshareList] =
     await Promise.all([
       apiGet("/community/detail", { tick: TICK }).then((community) => {
         currentCommunity = community || currentCommunity;
         return currentCommunity;
       }).catch(() => currentCommunity),
-      apiGet("/community/communityCredits", { tick: TICK, pages: 0 }).catch(() => []),
+      apiGet("/community/communityCredits", { tick: TICK, pages: 0 }).catch(() => currentCredits),
       apiGet("/curation/communityTweets", { tick: TICK, pages: 0, twitterId }).catch(() => currentTweets),
       apiGet("/user/getUserProfile", { twitterId }).catch(() => account),
       apiGet("/curation/userTweets", { twitterId, pages: 0 }).catch(() => []),
@@ -2578,6 +3252,7 @@ async function loadHubData(opts = {}) {
 
   if (Array.isArray(communityTweets) && communityTweets.length) currentTweets = communityTweets;
   if (Array.isArray(ipshareList) && ipshareList.length) currentIpshares = ipshareList;
+  if (Array.isArray(credits) && credits.length) currentCredits = credits;
   if ((profile && typeof profile === "object") || (vpop && typeof vpop === "object")) {
     const patch = { ...(profile || {}), ...(vpop || {}) };
     // getUserProfile/getVPOP can return null/blank identity fields (e.g. ethAddr:null).
@@ -2605,7 +3280,18 @@ async function loadHubData(opts = {}) {
     ) || null;
   }
 
-  const ownCredit = Array.isArray(credits) ? credits.find((row) => accountMatches(row, account)) || credits.find((row) => String(row.twitterUsername || "").toLowerCase() === username.toLowerCase()) : null;
+  // Resilience: under load some endpoints transiently fail (ECONNRESET). A failed
+  // communityCredits / ipshare fetch must NOT wipe the already-shown reputation/
+  // IPShare to 0 — reuse the last good value when this load came back empty.
+  const creditsArr = (Array.isArray(credits) && credits.length) ? credits
+    : (Array.isArray(currentCredits) && currentCredits.length) ? currentCredits : [];
+  let ownCredit = creditsArr.find((row) => accountMatches(row, account))
+    || creditsArr.find((row) => String(row.twitterUsername || "").toLowerCase() === username.toLowerCase())
+    || null;
+  if (ownCredit) _hubCache.ownCredit = ownCredit;
+  else if (_hubCache.ownCredit) ownCredit = _hubCache.ownCredit;
+  if (!resolvedIpshare && _hubCache.ipshare) resolvedIpshare = _hubCache.ipshare;
+  else if (resolvedIpshare) _hubCache.ipshare = resolvedIpshare;
   const buidlCommunityTweets = (Array.isArray(communityTweets) && communityTweets.length ? communityTweets : currentTweets).filter(isBuidlRow);
   // personalTweets: all user tweets (not filtered by BUIDL tick — user may post across communities)
   const personalTweets = Array.isArray(userTweets) && userTweets.length ? userTweets : currentTweets.filter((row) => accountMatches(row, account));
@@ -2634,7 +3320,9 @@ async function loadHubData(opts = {}) {
   const totalClaimableReward = rewardTotal + signalRewardAmount + curationRewardAmount;
   const holdingRows = Array.isArray(holdingList?.list) ? holdingList.list : Array.isArray(holdingList) ? holdingList : [];
   const buidlHolding = holdingRows.find((row) => String(row.tick || row.symbol || row.tokenName || row.community?.tick || "").toUpperCase() === TICK);
-  const buidlAmount = tokenAmountFromRow(buidlHolding);
+  let buidlAmount = tokenAmountFromRow(buidlHolding);
+  if (buidlAmount > 0) _hubCache.buidlAmount = buidlAmount;
+  else if (_hubCache.buidlAmount > 0) buidlAmount = _hubCache.buidlAmount; // keep last good on transient failure
   // If /community/holdingList (auth-only POST) didn't return the BUIDL holding, we
   // read the real ERC20 balance on-chain — but do NOT await it here. It must never
   // block the hub render: an unreachable/slow public RPC would otherwise hang
@@ -2647,7 +3335,7 @@ async function loadHubData(opts = {}) {
   const thirtyDayRewardTotal = hubRewardSeries.reduce((sum, value) => sum + value, 0);
   const weeklyRewardTotal = hubRewardSeries.slice(-7).reduce((sum, value) => sum + value, 0);
   const chartCaption = $("#chartCaption");
-  if (chartCaption) chartCaption.textContent = `过去30天收益为 ${formatNumber(thirtyDayRewardTotal)} $BUIDL`;
+  if (chartCaption) chartCaption.textContent = t(`过去30天收益为 ${formatNumber(thirtyDayRewardTotal)} $BUIDL`, `30-day rewards: ${formatNumber(thirtyDayRewardTotal)} $BUIDL`);
 
   const model = {
     user: { ...accountStore.getAccount(), ...(profile || {}), ...(ownCredit || {}) },
@@ -2679,6 +3367,7 @@ async function loadHubData(opts = {}) {
   };
   renderHubPreview(model);
   _hubLastLoadAt = Date.now();
+  saveHubCache();
   // Non-blocking on-chain BUIDL holding fallback (only when holdingList gave none).
   if (!(buidlAmount > 0) && isHexAddress(ethAddr) && isHexAddress(currentCommunity?.token)) {
     updateHubBuidlOnchain(ethAddr, currentCommunity.token, tokenPrice);
@@ -2695,7 +3384,10 @@ async function updateHubBuidlOnchain(ethAddr, token, tokenPrice) {
   try {
     const bal = await bscRpcCall("eth_call", [{ to: token, data: encodeAbi("0x70a08231", ["address"], [ethAddr]) }, "latest"]);
     const amount = Number(BigInt(bal || "0x0")) / 1e18;
-    if (!(amount > 0) || window.location.pathname !== "/hub") return;
+    if (!(amount > 0)) return;
+    _hubCache.buidlAmount = amount; // remember so transient RPC failures don't zero it next load
+    saveHubCache();
+    if (window.location.pathname !== "/hub") return;
     const el = $("#hubBuidl");
     if (!el) return;
     el.textContent = formatNumber(amount);
@@ -3342,6 +4034,7 @@ function setupIpshareControls() {
 }
 
 startClock();
+setupLangToggle();
 registerInjectedProviders();
 setupAccountControls();
 setupWalletButton();
@@ -3349,5 +4042,13 @@ setupRouter();
 setupSignalControls();
 setupAgentsControls();
 setupIpshareControls();
+setupVoteModalControls();
 drawNetwork();
 loadBuidlData();
+setInterval(refreshExploreNetworkMetrics, 30_000);
+loadCommunityActivity();
+setInterval(loadCommunityActivity, 30_000);
+setInterval(renderActivityTicker, 4_000);
+scheduleAlignHero();
+window.addEventListener("resize", scheduleAlignHero);
+window.addEventListener("load", scheduleAlignHero);
