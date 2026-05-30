@@ -6,7 +6,57 @@ TagAI / TipTag protocol (BSC). It is a standalone static SPA that talks to the
 coupled to the legacy `tagai-ui` source tree — TagAI is used only as the
 compatible account/data protocol via the TipTag API.
 
+## Deployment (buidlai.online)
+
+The app is a static server (`server.mjs`) that also reverse-proxies `/api` and
+`/atoc-data`, so production hosting just runs that process behind nginx — the same
+self-hosted + PM2 model as `tiptag-api`.
+
+Artifacts in this repo:
+
+- `ecosystem.config.cjs` — PM2 process (`buidlai-ui`); `--env production` points
+  `TIPTAG_API_BASE` at `https://bsc-api.tagai.fun`.
+- `deploy/nginx.buidlai.online.conf` — nginx vhost proxying `:80 → 127.0.0.1:5173`.
+- `deploy/deploy.sh` — one-shot deploy over SSH (clone/update → `npm ci` → PM2 reload).
+- `Dockerfile` — container alternative (`docker run -p 80:5173 ...`).
+
+### Steps
+
+1. **DNS** — `buidlai.online` is currently Namecheap URL-forwarding. Repoint it
+   with an **A record** to the host's public IP (and `www` as A or CNAME). Remove
+   the URL-forwarding/parking record.
+
+2. **Privy redirect** — the bundled `public/privy-adapter.js` hardcodes
+   `localhost:5173/callback`. For prod login, add `http://buidlai.online/callback`
+   (and the `https` variant once TLS is on) to the Privy dashboard, then rebuild:
+
+   ```bash
+   VITE_APP_PRIVY_APP_ID=... VITE_APP_PRIVY_CLIENT_ID=... \
+   VITE_APP_PRIVY_REDIRECT_URI=https://buidlai.online/callback \
+   VITE_APP_PRIVY_LOGIN_REDIRECT_URI=https://buidlai.online/callback \
+   npm run build:privy
+   ```
+
+3. **Ship it** — from your machine:
+
+   ```bash
+   DEPLOY_HOST=user@your-server ./deploy/deploy.sh
+   ```
+
+4. **nginx + TLS** on the host:
+
+   ```bash
+   sudo cp deploy/nginx.buidlai.online.conf /etc/nginx/sites-available/buidlai.online
+   sudo ln -s /etc/nginx/sites-available/buidlai.online /etc/nginx/sites-enabled/
+   sudo nginx -t && sudo systemctl reload nginx
+   sudo certbot --nginx -d buidlai.online -d www.buidlai.online
+   ```
+
+5. **Verify** — `curl -I http://buidlai.online/` returns `200` from the app
+   (not `Namecheap URL Forward`).
+
 ## Quick start
+
 
 ```bash
 npm install
