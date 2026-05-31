@@ -1,0 +1,5 @@
+# Files in public/ that should NOT be uploaded/served as static assets.
+# (Defense-in-depth; .env lives at repo root, not here, but be explicit.)
+.env
+.env.*
+*.map
