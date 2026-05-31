@@ -138,3 +138,6 @@ _npm_cache/*
 
 # OS
 .DS_Store
+
+# Cloudflare wrangler local cache
+.wrangler/

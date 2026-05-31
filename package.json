@@ -6,15 +6,18 @@
   "scripts": {
     "dev": "NODE_EXTRA_CA_CERTS=${NODE_EXTRA_CA_CERTS:-/etc/ssl/cert.pem} node server.mjs",
     "start": "NODE_EXTRA_CA_CERTS=${NODE_EXTRA_CA_CERTS:-/etc/ssl/cert.pem} node server.mjs",
-    "build:privy": "vite build --config vite.privy.config.mjs"
+    "build:privy": "vite build --config vite.privy.config.mjs",
+    "deploy:cf": "wrangler pages deploy public --project-name=buidlai --commit-dirty=true"
   },
   "dependencies": {
     "@privy-io/react-auth": "^2.24.0",
     "@vitejs/plugin-react": "^6.0.2",
-    "vite": "^8.0.13",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
-    "viem": "^2.33.1"
+    "viem": "^2.33.1",
+    "vite": "^8.0.13"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "wrangler": "^4.95.0"
+  }
 }
