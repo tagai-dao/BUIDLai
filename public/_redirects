@@ -1,4 +1,0 @@
-# SPA fallback: serve index.html for client-side routes (/hub, /signal, /agents,
-# /economy, /atoc, /callback, ...). Mirrors server.mjs's "fallback to index.html".
-# /api/* and /atoc-data are handled by Pages Functions and are NOT rewritten here.
-/*    /index.html   200
