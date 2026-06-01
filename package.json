@@ -7,7 +7,7 @@
     "dev": "NODE_EXTRA_CA_CERTS=${NODE_EXTRA_CA_CERTS:-/etc/ssl/cert.pem} node server.mjs",
     "start": "NODE_EXTRA_CA_CERTS=${NODE_EXTRA_CA_CERTS:-/etc/ssl/cert.pem} node server.mjs",
     "build:privy": "vite build --config vite.privy.config.mjs",
-    "deploy:cf": "wrangler pages deploy public --project-name=buidlai --commit-dirty=true"
+    "deploy:cf": "wrangler deploy"
   },
   "dependencies": {
     "@privy-io/react-auth": "^2.24.0",
