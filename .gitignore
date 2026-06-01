@@ -141,3 +141,8 @@ _npm_cache/*
 
 # Cloudflare wrangler local cache
 .wrangler/
+
+# Privy adapter build output — contains AppID/ClientID, built locally and
+# uploaded directly to Cloudflare via wrangler deploy (never committed).
+public/privy-adapter.js
+public/privy-adapter-*.js
