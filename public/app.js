@@ -1266,6 +1266,10 @@ function renderAtocWiki(wiki) {
   const idx = wiki.indexSummary || {};
   const arch = wiki.architecture || {};
   const flow = Array.isArray(arch.dataFlow) ? arch.dataFlow : [];
+  // The dashboard provides this header in Chinese; show an English version in EN mode.
+  const archDescription = (currentLang === "en" && /原始数据/.test(arch.description || ""))
+    ? "ATOC LLM WIKI — Raw Data → Comprehension & Extraction → Decision Dashboard → 4-Agent Consumption"
+    : safeText(arch.description, "ATOC LLM WIKI");
   el.innerHTML = `
     <div class="atoc-wiki-card">
       <h4>DATA LAYER OVERVIEW</h4>
@@ -1276,7 +1280,7 @@ function renderAtocWiki(wiki) {
       <div class="atoc-kv"><label>${t("未策展", "Uncurated")}</label><span>${wiki.uncuratedCount ?? 0}</span></div>
     </div>
     <div class="atoc-wiki-card">
-      <h4>${safeText(arch.description, "ATOC LLM WIKI")}</h4>
+      <h4>${archDescription}</h4>
       <ol class="atoc-flow-list">${flow.slice(0, 6).map((f) => `<li>${safeText(f, "")}</li>`).join("")}</ol>
     </div>
     <div class="atoc-wiki-card">
