@@ -23,3 +23,8 @@ ATOC_DATA_URL   = "https://atocdashboard.tagclaw.com/data/dashboard-data.json"
 [[routes]]
 pattern = "buidlai.online/*"
 zone_name = "buidlai.online"
+
+# www → handled by the Worker too (it 301-redirects www to the apex)
+[[routes]]
+pattern = "www.buidlai.online/*"
+zone_name = "buidlai.online"

@@ -19,6 +19,12 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    // ── canonical host: redirect www → apex (keeps one canonical URL) ─────────
+    if (url.hostname === "www.buidlai.online") {
+      url.hostname = "buidlai.online";
+      return Response.redirect(url.toString(), 301);
+    }
+
     // ── /api/* ──────────────────────────────────────────────────────────────
     if (path.startsWith("/api/")) {
       return proxyApi(request, url, env);
