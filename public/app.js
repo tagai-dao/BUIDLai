@@ -88,6 +88,7 @@ let currentAccount = null;
 let hubRewardSeries = null;
 let communityActivities = [];
 let activityIndex = 0;
+let lastCommunityActivity = null;
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -128,6 +129,43 @@ function translateActionType(actionType) {
     "Dark Forest": t("黑暗森林", "Dark Forest")
   };
   return labels[action] || safeText(action, t("动态", "Activity"));
+}
+
+function activityTimeValue(row) {
+  const raw = row?.timestamp || row?.createdAt || row?.createTime || row?.tweetTime || row?.time || row?.date;
+  const value = raw ? new Date(raw).getTime() : 0;
+  return Number.isFinite(value) ? value : 0;
+}
+
+function buildFallbackActivity() {
+  const candidates = [];
+  const latestTweet = (Array.isArray(currentTweets) ? currentTweets : [])
+    .slice()
+    .sort((a, b) => activityTimeValue(b) - activityTimeValue(a))[0];
+  if (latestTweet) {
+    candidates.push({
+      actionType: "Post Signal",
+      actorId: latestTweet.twitterId || latestTweet.twitterUsername || latestTweet.ethAddr,
+      actorName: latestTweet.twitterUsername || latestTweet.twitterName || latestTweet.twitterId,
+      address: latestTweet.ethAddr || latestTweet.address,
+      timestamp: latestTweet.tweetTime || latestTweet.createdAt || latestTweet.createTime
+    });
+  }
+  const latestTrade = (Array.isArray(currentTrades) ? currentTrades : [])
+    .slice()
+    .sort((a, b) => activityTimeValue(b) - activityTimeValue(a))[0];
+  if (latestTrade) {
+    candidates.push({
+      actionType: latestTrade.isBuy || latestTrade.side === "buy" || latestTrade.type === "buy" ? "Buy" : "Sell",
+      actorId: latestTrade.twitterId || latestTrade.twitterUsername || latestTrade.trader || latestTrade.address,
+      actorName: latestTrade.twitterUsername || latestTrade.twitterName || latestTrade.trader || latestTrade.address,
+      address: latestTrade.trader || latestTrade.address || latestTrade.ethAddr,
+      timestamp: latestTrade.timestamp || latestTrade.createdAt || latestTrade.time
+    });
+  }
+  return candidates
+    .filter((row) => row.actorId || row.actorName || row.address)
+    .sort((a, b) => activityTimeValue(b) - activityTimeValue(a))[0] || null;
 }
 
 function profileImageUrl(account) {
@@ -308,6 +346,40 @@ function renderSignalFeed(tweets) {
     `;
     feed.appendChild(card);
   });
+}
+
+// The top-right reward shown on a signal card.
+function tweetReward(tweet) {
+  return Number(tweet.amount || tweet.credit || tweet.curateAmount || 0);
+}
+
+// Does this tweet belong to the given sub-tag (by its tags[] field or a $CASHTAG)?
+function tweetMatchesTag(tweet, tagName) {
+  const upper = String(tagName || "").toUpperCase();
+  if (!upper) return false;
+  let tags = tweet.tags;
+  if (typeof tags === "string") { try { tags = JSON.parse(tags); } catch { tags = null; } }
+  if (Array.isArray(tags) && tags.some((x) => String(x).toUpperCase() === upper)) return true;
+  const cashtag = upper.replace(/[^A-Z0-9_]/g, "");
+  if (!cashtag) return false;
+  return new RegExp("\\$" + cashtag + "(?![A-Za-z0-9_])", "i").test(String(tweet.content || ""));
+}
+
+// Sort sub-tags by the summed top-right reward of their posts from the last day.
+function sortMiniTagsByReward(tags, tweets) {
+  const since = Date.now() - 24 * 3600 * 1000;
+  const recent = (Array.isArray(tweets) ? tweets : []).filter(
+    (t) => new Date(t.tweetTime || 0).getTime() > since
+  );
+  tags.forEach((tag) => {
+    const name = tag.name || tag.tag || "";
+    tag.rewardSum = recent.reduce(
+      (sum, t) => sum + (tweetMatchesTag(t, name) ? tweetReward(t) : 0),
+      0
+    );
+  });
+  tags.sort((a, b) => (b.rewardSum || 0) - (a.rewardSum || 0));
+  return tags;
 }
 
 function formatSignalTime(value) {
@@ -731,25 +803,30 @@ function renderActivityTicker() {
   const actorEl = $("#activityActor");
   const addressEl = $("#activityAddress");
   if (!typeEl || !actorEl || !addressEl) return;
-  if (!communityActivities.length) {
-    typeEl.textContent = t("暂无动态", "No activity");
-    actorEl.textContent = "id name";
-    addressEl.textContent = "address";
+  const fallback = lastCommunityActivity || buildFallbackActivity();
+  if (!communityActivities.length && !fallback) {
+    typeEl.textContent = t("加载动态", "Loading activity");
+    actorEl.textContent = "";
+    addressEl.textContent = "";
     return;
   }
-  const activity = communityActivities[activityIndex % communityActivities.length];
+  const activity = communityActivities.length
+    ? communityActivities[activityIndex % communityActivities.length]
+    : fallback;
   const actorId = safeText(activity.actorId, "id");
   const actorName = safeText(activity.actorName, actorId).replace(/^@/, "");
   typeEl.textContent = translateActionType(activity.actionType);
   actorEl.textContent = `@${actorName || actorId}`;
-  addressEl.textContent = activity.address ? compactAddress(String(activity.address)) : "address";
-  activityIndex = (activityIndex + 1) % communityActivities.length;
+  addressEl.textContent = activity.address ? compactAddress(String(activity.address)) : "";
+  lastCommunityActivity = activity;
+  if (communityActivities.length) activityIndex = (activityIndex + 1) % communityActivities.length;
 }
 
 async function loadCommunityActivity() {
   try {
     const rows = await apiGet("/community/activity", { tick: TICK, limit: 30 });
     communityActivities = Array.isArray(rows) ? rows : [];
+    if (communityActivities.length) lastCommunityActivity = communityActivities[0];
     activityIndex = 0;
     renderActivityTicker();
   } catch (_) {
@@ -1270,6 +1347,24 @@ function renderAtocWiki(wiki) {
   const archDescription = (currentLang === "en" && /原始数据/.test(arch.description || ""))
     ? "ATOC LLM WIKI — Raw Data → Comprehension & Extraction → Decision Dashboard → 4-Agent Consumption"
     : safeText(arch.description, "ATOC LLM WIKI");
+  const translateWikiFlow = (value) => {
+    if (currentLang !== "en") return value;
+    const normalized = String(value || "").trim();
+    const flowLabels = {
+      "原始数据": "Raw Data",
+      "理解提取": "Comprehension & Extraction",
+      "决策面板": "Decision Dashboard",
+      "4 Agent 消费": "4-Agent Consumption",
+      "4 Agent消费": "4-Agent Consumption",
+      "Agent 消费": "Agent Consumption"
+    };
+    return flowLabels[normalized] || normalized
+      .replace(/原始数据/g, "Raw Data")
+      .replace(/理解提取/g, "Comprehension & Extraction")
+      .replace(/决策面板/g, "Decision Dashboard")
+      .replace(/4\s*Agent\s*消费/g, "4-Agent Consumption")
+      .replace(/Agent\s*消费/g, "Agent Consumption");
+  };
   el.innerHTML = `
     <div class="atoc-wiki-card">
       <h4>DATA LAYER OVERVIEW</h4>
@@ -1281,7 +1376,7 @@ function renderAtocWiki(wiki) {
     </div>
     <div class="atoc-wiki-card">
       <h4>${archDescription}</h4>
-      <ol class="atoc-flow-list">${flow.slice(0, 6).map((f) => `<li>${safeText(f, "")}</li>`).join("")}</ol>
+      <ol class="atoc-flow-list">${flow.slice(0, 6).map((f) => `<li>${safeText(translateWikiFlow(f), "")}</li>`).join("")}</ol>
     </div>
     <div class="atoc-wiki-card">
       <h4>TAS SUMMARY</h4>
@@ -2634,6 +2729,9 @@ async function loadSignalPage() {
         type: 1
       }));
     }
+
+    // Order sub-tags by the summed top-right reward of their last-day #BUIDL posts.
+    miniTags = sortMiniTagsByReward(miniTags, currentTweets);
 
     // Real stats from API data
     const allTweets = currentTweets;
