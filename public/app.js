@@ -353,6 +353,22 @@ function tweetReward(tweet) {
   return Number(tweet.amount || tweet.credit || tweet.curateAmount || 0);
 }
 
+function tweetTrendingScore(tweet) {
+  return Number(tweet.likeCount || 0) + Number(tweet.replyCount || 0) +
+    Number(tweet.retweetCount || 0) + Number(tweet.quoteCount || 0) + Number(tweet.curateCount || 0);
+}
+
+// Order tweets by the active feed mode (Trending = engagement, New = recency).
+function sortTweetsByMode(tweets, mode) {
+  const arr = Array.isArray(tweets) ? [...tweets] : [];
+  if (mode === "trending") {
+    arr.sort((a, b) => (tweetTrendingScore(b) - tweetTrendingScore(a)) || (tweetReward(b) - tweetReward(a)));
+  } else {
+    arr.sort((a, b) => new Date(b.tweetTime || 0).getTime() - new Date(a.tweetTime || 0).getTime());
+  }
+  return arr;
+}
+
 // Does this tweet belong to the given sub-tag (by its tags[] field or a $CASHTAG)?
 function tweetMatchesTag(tweet, tagName) {
   const upper = String(tagName || "").toUpperCase();
@@ -1019,16 +1035,14 @@ function setupSignalControls() {
     signalMode = "trending";
     $("#signalTrendingButton").classList.add("is-active");
     $("#signalNewButton").classList.remove("is-active");
-    selectedMiniTag = null;
-    renderMiniTags();
+    // Keep the selected sub-tag — just re-sort its feed by the new mode.
     loadSignalFeed();
   });
   $("#signalNewButton")?.addEventListener("click", () => {
     signalMode = "new";
     $("#signalNewButton").classList.add("is-active");
     $("#signalTrendingButton").classList.remove("is-active");
-    selectedMiniTag = null;
-    renderMiniTags();
+    // Keep the selected sub-tag — just re-sort its feed by the new mode.
     loadSignalFeed();
   });
   $("#openPostCurate")?.addEventListener("click", () => {
@@ -2784,6 +2798,8 @@ async function loadSignalFeed() {
           return false;
         });
       }
+      // Apply the Trending/New ordering within the selected tag's posts.
+      tweets = sortTweetsByMode(tweets, signalMode);
     } else if (signalMode === "trending") {
       tweets = await apiGet("/curation/communityTrendingTweets", { tick: TICK, pages: 0 });
     } else {
