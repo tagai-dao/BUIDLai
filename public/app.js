@@ -79,6 +79,9 @@ let currentIpshares = [];
 let signalMode = "new";
 let selectedMiniTag = null;
 let miniTags = [];
+const SIGNAL_TAG_LOOKBACK_DAYS = 7;
+const SIGNAL_TAG_FETCH_PAGES = 20;
+const SIGNAL_TAG_PAGE_SIZE = 30;
 let agentTab = "ipshare";
 let currentCredits = [];
 let currentEarnRows = [];
@@ -321,7 +324,7 @@ function renderSignalFeed(tweets) {
       const cashtagMatch = String(tweet.content || "").match(/\$([A-Za-z][A-Za-z0-9_]*)/);
       tagLabel = cashtagMatch ? cashtagMatch[1] : (tweet.tags || tweet.tick || TICK);
     }
-    const score = Number(tweet.amount || tweet.credit || tweet.curateAmount || 0);
+    const score = tweetReward(tweet);
     const profileImg = getProfileImage(tweet);
     const card = document.createElement("article");
     card.className = "signal-post-card";
@@ -342,7 +345,7 @@ function renderSignalFeed(tweets) {
           <span>♨ ${tweet.likeCount || 0}</span>
         </footer>
       </div>
-      <div class="signal-score">${formatNumber(score || 0)}${score ? "" : " VP"}</div>
+      <div class="signal-score">${formatNumber(score || 0)}</div>
     `;
     feed.appendChild(card);
   });
@@ -350,7 +353,18 @@ function renderSignalFeed(tweets) {
 
 // The top-right reward shown on a signal card.
 function tweetReward(tweet) {
-  return Number(tweet.amount || tweet.credit || tweet.curateAmount || 0);
+  return Number(tweet?.amount || 0);
+}
+
+function signalTagTimeWeight(tweetTime) {
+  const time = new Date(tweetTime || 0).getTime();
+  if (!Number.isFinite(time) || time <= 0) return 0;
+  const ageMs = Date.now() - time;
+  if (ageMs < 0) return 1;
+  const ageDays = ageMs / (24 * 3600 * 1000);
+  if (ageDays > SIGNAL_TAG_LOOKBACK_DAYS) return 0;
+  if (ageDays <= 1) return 1;
+  return Math.pow(0.5, ageDays - 1);
 }
 
 function tweetTrendingScore(tweet) {
@@ -381,16 +395,15 @@ function tweetMatchesTag(tweet, tagName) {
   return new RegExp("\\$" + cashtag + "(?![A-Za-z0-9_])", "i").test(String(tweet.content || ""));
 }
 
-// Sort sub-tags by the summed top-right reward of their posts from the last day.
+// Sort sub-tags by the 7-day, time-decayed top-right reward of their #BUIDL posts.
 function sortMiniTagsByReward(tags, tweets) {
-  const since = Date.now() - 24 * 3600 * 1000;
   const recent = (Array.isArray(tweets) ? tweets : []).filter(
-    (t) => new Date(t.tweetTime || 0).getTime() > since
+    (t) => signalTagTimeWeight(t.tweetTime) > 0
   );
   tags.forEach((tag) => {
     const name = tag.name || tag.tag || "";
     tag.rewardSum = recent.reduce(
-      (sum, t) => sum + (tweetMatchesTag(t, name) ? tweetReward(t) : 0),
+      (sum, t) => sum + (tweetMatchesTag(t, name) ? tweetReward(t) * signalTagTimeWeight(t.tweetTime) : 0),
       0
     );
   });
@@ -2700,15 +2713,43 @@ async function blinksWaitReceipt(provider, hash, timeoutMs = 60000) {
   return false;
 }
 
+async function loadRecentSignalTweets() {
+  const pages = [];
+  for (let page = 0; page < SIGNAL_TAG_FETCH_PAGES; page += 1) {
+    const rows = await apiGet("/curation/communityTweets", { tick: TICK, pages: page }).catch(() => []);
+    if (!Array.isArray(rows) || !rows.length) break;
+    pages.push(rows);
+    const oldest = rows.reduce((min, tweet) => {
+      const time = new Date(tweet?.tweetTime || 0).getTime();
+      return Number.isFinite(time) && time > 0 ? Math.min(min, time) : min;
+    }, Infinity);
+    if (rows.length < SIGNAL_TAG_PAGE_SIZE || signalTagTimeWeight(oldest) <= 0) break;
+  }
+  const seen = new Set();
+  const tweets = [];
+  for (const page of pages) {
+    if (!Array.isArray(page)) continue;
+    for (const tweet of page) {
+      const id = tweet?.tweetId || `${tweet?.twitterId || ""}-${tweet?.tweetTime || ""}-${tweet?.content || ""}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      tweets.push(tweet);
+    }
+  }
+  return tweets
+    .sort((a, b) => new Date(b.tweetTime || 0).getTime() - new Date(a.tweetTime || 0).getTime());
+}
+
 async function loadSignalPage() {
   renderMiniTags();
   renderSignalFeed(currentTweets);
   try {
     const [tags, tweets] = await Promise.all([
       apiGet("/communityMiniTag/getCommunityMiniTags", { tick: TICK }).catch(() => []),
-      apiGet("/curation/communityTweets", { tick: TICK, pages: 0 }).catch(() => currentTweets)
+      loadRecentSignalTweets().catch(() => currentTweets)
     ]);
     currentTweets = Array.isArray(tweets) && tweets.length ? tweets : currentTweets;
+    const tagSourceTweets = currentTweets.filter((tweet) => signalTagTimeWeight(tweet.tweetTime) > 0);
 
     // Use API mini tags if available, otherwise extract $CASHTAGs from tweet content
     if (Array.isArray(tags) && tags.length) {
@@ -2716,7 +2757,7 @@ async function loadSignalPage() {
     } else {
       // Extract unique $CASHTAG mentions from all tweets
       const tagSet = new Map();
-      currentTweets.forEach((t) => {
+      tagSourceTweets.forEach((t) => {
         const content = String(t.content || "");
         const matches = content.matchAll(/\$([A-Za-z][A-Za-z0-9_]{1,})/g);
         for (const match of matches) {
@@ -2725,7 +2766,7 @@ async function loadSignalPage() {
         }
       });
       // Also parse the tweet 'tags' field (JSON string array)
-      currentTweets.forEach((t) => {
+      tagSourceTweets.forEach((t) => {
         if (!t.tags) return;
         try {
           const parsed = typeof t.tags === "string" ? JSON.parse(t.tags) : t.tags;
@@ -2747,8 +2788,8 @@ async function loadSignalPage() {
       }));
     }
 
-    // Order sub-tags by the summed top-right reward of their last-day #BUIDL posts.
-    miniTags = sortMiniTagsByReward(miniTags, currentTweets);
+    // Order sub-tags by the summed, time-decayed top-right reward of their last-week #BUIDL posts.
+    miniTags = sortMiniTagsByReward(miniTags, tagSourceTweets);
 
     // Real stats from API data
     const allTweets = currentTweets;
