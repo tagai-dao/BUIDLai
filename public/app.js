@@ -397,7 +397,10 @@ function formatSignalTime(value) {
 function renderMiniTags() {
   const bar = $("#miniTagBar");
   if (!bar) return;
-  const items = miniTags.length ? miniTags : [];
+  // Hide the #BUIDL chip itself — it's the community, already covered by "All".
+  const items = (miniTags.length ? miniTags : []).filter(
+    (tag) => String(tag.name || tag.tag || tag.tick || "").toUpperCase() !== TICK
+  );
   bar.innerHTML = "";
 
   // "All" button — shows all #BUIDL community tweets
