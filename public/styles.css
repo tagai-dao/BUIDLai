@@ -1136,18 +1136,26 @@ code {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 24px;
-  align-items: start;
+  align-items: center;
   margin: 18px 0 28px;
 }
 
 .mini-tag-bar {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0 2px 4px;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
 }
 
 .mini-tag-button,
 .feed-mode-button {
+  flex: 0 0 auto;
   min-height: 38px;
   padding: 6px 16px;
   background: #fff;
