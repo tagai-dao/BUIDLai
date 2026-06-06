@@ -82,8 +82,11 @@ let miniTags = [];
 const SIGNAL_TAG_LOOKBACK_DAYS = 7;
 const SIGNAL_TAG_FETCH_PAGES = 20;
 const SIGNAL_TAG_PAGE_SIZE = 30;
+const BUIDLAI_CREDIT_FETCH_PAGES = 20;
 let agentTab = "ipshare";
 let currentCredits = [];
+let currentBuidlaiCreditMap = new Map();
+let buidlaiCreditsPromise = null;
 let currentEarnRows = [];
 let bnbUsd = 650;
 let currentTrades = [];
@@ -322,7 +325,7 @@ function renderSignalFeed(tweets) {
     let tagLabel = selectedMiniTag?.name || selectedMiniTag?.tag || "";
     if (!tagLabel) {
       const cashtagMatch = String(tweet.content || "").match(/\$([A-Za-z][A-Za-z0-9_]*)/);
-      tagLabel = cashtagMatch ? cashtagMatch[1] : (tweet.tags || tweet.tick || TICK);
+      tagLabel = cashtagMatch ? cashtagMatch[1] : (primaryTweetTag(tweet) || tweet.tick || TICK);
     }
     const score = tweetReward(tweet);
     const profileImg = getProfileImage(tweet);
@@ -351,9 +354,130 @@ function renderSignalFeed(tweets) {
   });
 }
 
-// The top-right reward shown on a signal card.
+function primaryTweetTag(tweet) {
+  const tags = tweet?.tags;
+  if (Array.isArray(tags)) return safeText(tags[0], "");
+  if (typeof tags === "string" && tags.trim()) {
+    try {
+      const parsed = JSON.parse(tags);
+      if (Array.isArray(parsed)) return safeText(parsed[0], "");
+    } catch {
+      return tags;
+    }
+  }
+  return "";
+}
+
+function parseCreditFactor(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function normalizeLookupValue(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function buidlaiCreditKeys(row) {
+  const keys = [];
+  const twitterId = normalizeLookupValue(row?.twitterId);
+  const username = normalizeLookupValue(row?.twitterUsername || row?.username);
+  const ethAddr = normalizeLookupValue(row?.ethAddr || row?.address);
+  if (twitterId) keys.push(`tid:${twitterId}`);
+  if (username) keys.push(`tw:${username}`);
+  if (ethAddr) keys.push(`addr:${ethAddr}`);
+  return keys;
+}
+
+function rebuildBuidlaiCreditMap(rows) {
+  const map = new Map();
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const factor = parseCreditFactor(row?.creditFactor);
+    const model = {
+      credit: Number(row?.credit || 0),
+      twitterReputation: Number(factor[3] || 0)
+    };
+    buidlaiCreditKeys(row).forEach((key) => map.set(key, model));
+  });
+  currentBuidlaiCreditMap = map;
+  return map;
+}
+
+async function loadBuidlaiCreditMap() {
+  if (buidlaiCreditsPromise) return buidlaiCreditsPromise;
+  buidlaiCreditsPromise = (async () => {
+    const rows = [];
+    for (let page = 0; page < BUIDLAI_CREDIT_FETCH_PAGES; page += 1) {
+      const pageRows = await apiGet("/community/communityCredits", { tick: TICK, pages: page }).catch(() => []);
+      if (!Array.isArray(pageRows) || !pageRows.length) break;
+      rows.push(...pageRows);
+      if (pageRows.length < SIGNAL_TAG_PAGE_SIZE) break;
+    }
+    return rebuildBuidlaiCreditMap(rows.length ? rows : currentCredits);
+  })().catch((error) => {
+    buidlaiCreditsPromise = null;
+    throw error;
+  });
+  return buidlaiCreditsPromise;
+}
+
+function buidlaiCreditForTweet(tweet) {
+  for (const key of buidlaiCreditKeys(tweet)) {
+    const match = currentBuidlaiCreditMap.get(key);
+    if (match) return match;
+  }
+  return null;
+}
+
+function estimateTwitterReputation(tweet) {
+  const followers = Math.max(0, Number(tweet?.followers || 0));
+  if (!followers) return 0;
+  const followings = Math.max(0, Number(tweet?.followings || 0));
+  const audience = Math.log10(followers + 10);
+  const balance = Math.log10(followers + 10) / Math.max(1, Math.log10(followings + 10));
+  return Math.max(0, audience * audience * Math.min(2, Math.max(0.5, balance)));
+}
+
+function twitterReputationForTweet(tweet) {
+  const credit = buidlaiCreditForTweet(tweet);
+  const exact = Number(credit?.twitterReputation || 0);
+  return exact > 0 ? exact : estimateTwitterReputation(tweet);
+}
+
+function tweetInteractionWeight(tweet) {
+  return 1 +
+    Number(tweet?.replyCount || 0) * 3 +
+    Number(tweet?.curateCount || 0) * 3 +
+    Number(tweet?.retweetCount || 0) * 2 +
+    Number(tweet?.quoteCount || 0) * 2 +
+    Number(tweet?.likeCount || 0);
+}
+
+function applyBuidlaiPoBAmounts(tweets) {
+  const rows = Array.isArray(tweets) ? tweets : [];
+  const pool = rows.reduce((sum, tweet) => sum + Number(tweet?.amount || 0), 0);
+  const weights = rows.map((tweet) => twitterReputationForTweet(tweet) * tweetInteractionWeight(tweet));
+  const totalWeight = weights.reduce((sum, value) => sum + value, 0);
+  rows.forEach((tweet, index) => {
+    const original = Number(tweet?.amount || 0);
+    const score = pool > 0 && totalWeight > 0 ? pool * weights[index] / totalWeight : original;
+    tweet.buidlaiPoBAmount = Number.isFinite(score) ? score : original;
+    tweet.buidlaiTwitterReputation = twitterReputationForTweet(tweet);
+  });
+  return rows;
+}
+
+// The top-right reward shown on a signal card. BUIDLai uses a local PoB
+// discovery score with Twitter Reputation as the only credit factor.
 function tweetReward(tweet) {
-  return Number(tweet?.amount || 0);
+  return Number(tweet?.buidlaiPoBAmount ?? tweet?.amount ?? 0);
 }
 
 function signalTagTimeWeight(tweetTime) {
@@ -794,6 +918,7 @@ async function loadBuidlData() {
     applyCommunityData(community);
     applyIpshareData(ipshares);
     currentCredits = Array.isArray(credits) ? credits : currentCredits;
+    rebuildBuidlaiCreditMap(currentCredits);
     currentTrades = Array.isArray(trades) ? trades : currentTrades;
     currentTweets = Array.isArray(tweets) && tweets.length ? tweets : [];
     applyExploreNetworkMetrics(buildExploreNetworkMetrics({
@@ -2746,9 +2871,10 @@ async function loadSignalPage() {
   try {
     const [tags, tweets] = await Promise.all([
       apiGet("/communityMiniTag/getCommunityMiniTags", { tick: TICK }).catch(() => []),
-      loadRecentSignalTweets().catch(() => currentTweets)
+      loadRecentSignalTweets().catch(() => currentTweets),
+      loadBuidlaiCreditMap().catch(() => currentBuidlaiCreditMap)
     ]);
-    currentTweets = Array.isArray(tweets) && tweets.length ? tweets : currentTweets;
+    currentTweets = applyBuidlaiPoBAmounts(Array.isArray(tweets) && tweets.length ? tweets : currentTweets);
     const tagSourceTweets = currentTweets.filter((tweet) => signalTagTimeWeight(tweet.tweetTime) > 0);
 
     // Use API mini tags if available, otherwise extract $CASHTAGs from tweet content
@@ -2847,7 +2973,8 @@ async function loadSignalFeed() {
       tweets = await apiGet("/curation/communityTweets", { tick: TICK, pages: 0 });
     }
     const result = Array.isArray(tweets) && tweets.length ? tweets : currentTweets;
-    renderSignalFeed(result);
+    await loadBuidlaiCreditMap().catch(() => currentBuidlaiCreditMap);
+    renderSignalFeed(applyBuidlaiPoBAmounts(result));
   } catch {
     renderSignalFeed(currentTweets);
   }
