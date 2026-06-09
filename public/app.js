@@ -574,6 +574,25 @@ function tweetMatchesTag(tweet, tagName) {
   return new RegExp("\\$" + cashtag + "(?![A-Za-z0-9_])", "i").test(String(tweet.content || ""));
 }
 
+function hasBlinksCommerce(tweet) {
+  if (!tweet) return false;
+  return Boolean(
+    tweet.commerceId ||
+    tweet.commerceID ||
+    tweet.commerce_id ||
+    tweet.blinksId ||
+    tweet.blinkId ||
+    tweet.tradeId ||
+    tweet.buyCount ||
+    tweet.sellCount
+  );
+}
+
+function filterBlinksTweets(tweets) {
+  return filterSignalTweetsByCutoff(Array.isArray(tweets) ? tweets : [])
+    .filter(hasBlinksCommerce);
+}
+
 function buildMiniTagsFromTweets(tweets) {
   const tagSet = new Map();
   (Array.isArray(tweets) ? tweets : []).forEach((tweet) => {
@@ -2518,9 +2537,43 @@ async function loadBlinksPage() {
   feed.innerHTML = `<div class="blinks-page"><div id="blinksList" class="blinks-list"><div class="prediction-loading">Loading Blinks...</div></div></div>`;
 
   try {
-    // Get community tweets and filter for Blinks (those with commerceId)
-    const tweets = await apiGet("/curation/communityTweets", { tick: TICK, pages: 0 }).catch(() => currentTweets);
-    const blinksTweets = (Array.isArray(tweets) ? tweets : currentTweets).filter((t) => t.commerceId);
+    if (signalPageDataPromise) await signalPageDataPromise.catch(() => {});
+
+    let sourceTweets = filterSignalTweetsByCutoff(currentTweets);
+    let blinksTweets = filterBlinksTweets(sourceTweets);
+
+    for (let page = 0; !blinksTweets.length && page < SIGNAL_TAG_FETCH_PAGES; page += SIGNAL_TAG_FETCH_BATCH_SIZE) {
+      const pageNumbers = Array.from(
+        { length: Math.min(SIGNAL_TAG_FETCH_BATCH_SIZE, SIGNAL_TAG_FETCH_PAGES - page) },
+        (_, index) => page + index
+      );
+      const pageRows = await Promise.all(pageNumbers.map((pageNumber) => loadSignalRowsPage(pageNumber)));
+      let shouldStop = false;
+
+      pageRows.forEach((rows) => {
+        if (!Array.isArray(rows) || !rows.length) {
+          shouldStop = true;
+          return;
+        }
+
+        const scopedRows = filterSignalTweetsByCutoff(rows);
+        if (scopedRows.length) sourceTweets = mergeTweetRows(sourceTweets, scopedRows);
+
+        const oldest = rows.reduce((min, tweet) => {
+          const time = signalTweetTimeValue(tweet);
+          return time > 0 ? Math.min(min, time) : min;
+        }, Infinity);
+        if (rows.length < SIGNAL_TAG_PAGE_SIZE || oldest < SIGNAL_POSTS_CUTOFF_TIME) shouldStop = true;
+      });
+
+      blinksTweets = filterBlinksTweets(sourceTweets);
+      if (shouldStop) break;
+    }
+
+    if (sourceTweets.length > currentTweets.length) {
+      currentTweets = applyBuidlaiPoBAmounts(mergeTweetRows(currentTweets, sourceTweets));
+      refreshSignalMiniTags();
+    }
 
     // Also get recent trade list for the token
     const token = currentCommunity?.token;
@@ -3068,7 +3121,7 @@ async function loadSignalPage() {
     const allTweets = currentTweets;
     const totalPosts = allTweets.length;
     const totalCurations = allTweets.reduce((sum, t) => sum + Number(t.curateCount || 0) + Number(t.likeCount || 0) + Number(t.replyCount || 0), 0);
-    const copyTradingCount = allTweets.filter((t) => t.commerceId || t.buyCount).length;
+    const copyTradingCount = filterBlinksTweets(allTweets).length;
 
     $("#signalStatPosts").textContent = formatNumber(totalPosts + totalCurations);
     $("#signalStatCopy").textContent = formatNumber(copyTradingCount);
