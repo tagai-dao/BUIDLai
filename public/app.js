@@ -126,6 +126,14 @@ function safeText(value, fallback = "") {
   return value === null || value === undefined || value === "" ? fallback : String(value);
 }
 
+function safeAttr(value, fallback = "") {
+  return safeText(value, fallback)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 function signalTweetTimeValue(tweet) {
   const raw = tweet?.tweetTime || tweet?.createdAt || tweet?.createTime || tweet?.timestamp || tweet?.time || tweet?.date;
   const value = raw ? new Date(raw).getTime() : 0;
@@ -355,10 +363,11 @@ function renderSignalFeed(tweets) {
     }
     const score = tweetReward(tweet);
     const profileImg = getProfileImage(tweet);
+    const initial = safeAttr(avatarInitial(tweet), "B");
     const card = document.createElement("article");
     card.className = "signal-post-card";
     card.innerHTML = `
-      <div class="signal-avatar">${profileImg ? `<img src="${profileImg}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%">` : ""}</div>
+      <div class="signal-avatar"><span>${initial}</span>${profileImg ? `<img src="${safeAttr(profileImg)}" alt="" loading="lazy" onerror="this.remove()">` : ""}</div>
       <div class="signal-post-main">
         <header>
           <strong>${safeText(tweet.twitterName || tweet.twitterUsername, "BUIDL Agent")}</strong>
@@ -654,8 +663,18 @@ function renderMiniTags() {
 }
 
 function getProfileImage(row) {
-  if (!row?.profile) return "";
-  return String(row.profile).replace("normal", "200x200");
+  const raw = row?.profile || row?.profileImg || row?.profileImage || row?.profile_image_url || row?.avatar || "";
+  if (raw) {
+    return String(raw)
+      .replace("_normal.", "_200x200.")
+      .replace("normal", "200x200");
+  }
+  const username = String(row?.twitterUsername || row?.username || "").replace(/^@/, "").trim();
+  return username ? `https://unavatar.io/x/${encodeURIComponent(username)}` : "";
+}
+
+function avatarInitial(row) {
+  return safeText(row?.twitterName || row?.twitterUsername || row?.username, "B").trim().slice(0, 1).toUpperCase();
 }
 
 function calculateIPsharePriceLocal(supply) {
