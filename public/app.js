@@ -2979,18 +2979,27 @@ async function loadSignalFeed() {
     let hasScopedTagFeed = false;
     if (tagSnapshot) {
       hasScopedTagFeed = true;
-      // Try the API endpoint first; if it fails or returns empty, fall back to local filtering
-      tweets = await apiGet("/curation/tagTweets", {
-        communityId: tagSnapshot.tick || TICK,
-        tag: tagSnapshot.tag || tagSnapshot.name,
-        pages: 0
-      }).catch(() => null);
-      tweets = filterSignalTweetsByCutoff(tweets);
-      // If the tag endpoint has no in-scope rows, filter locally from the current All feed.
+      const tagName = tagSnapshot.tag || tagSnapshot.name || "";
+      // Prefer the current All feed. The tag endpoint often returns old rows,
+      // while many live sub-tags only exist as $CASHTAGs in tweet content.
+      let localSourceTweets = currentTweets;
+      if (!localSourceTweets.length && signalPageDataPromise) {
+        const pageData = await signalPageDataPromise.catch(() => null);
+        const pageTweets = Array.isArray(pageData?.[1]) ? filterSignalTweetsByCutoff(pageData[1]) : [];
+        if (pageTweets.length) {
+          localSourceTweets = applyBuidlaiPoBAmounts(pageTweets);
+          currentTweets = localSourceTweets;
+        }
+      }
+      tweets = filterSignalTweetsByCutoff(localSourceTweets).filter((t) => tweetMatchesTag(t, tagName));
+      // If local feed has no rows yet, use the tag endpoint as a supplement.
       if (!Array.isArray(tweets) || !tweets.length) {
-        if (!currentTweets.length && signalPageDataPromise) await signalPageDataPromise.catch(() => null);
-        const tagName = tagSnapshot.tag || tagSnapshot.name || "";
-        tweets = filterSignalTweetsByCutoff(currentTweets).filter((t) => tweetMatchesTag(t, tagName));
+        tweets = await apiGet("/curation/tagTweets", {
+          communityId: TICK,
+          tag: tagName,
+          pages: 0
+        }).catch(() => null);
+        tweets = filterSignalTweetsByCutoff(tweets);
       }
       // Apply the Trending/New ordering within the selected tag's posts.
       tweets = sortTweetsByMode(tweets, modeSnapshot);
