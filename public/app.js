@@ -86,6 +86,7 @@ let miniTags = [];
 const SIGNAL_TAG_LOOKBACK_DAYS = 7;
 const SIGNAL_INITIAL_FETCH_PAGES = 6;
 const SIGNAL_TAG_FETCH_PAGES = 60;
+const SIGNAL_TAG_FETCH_BATCH_SIZE = 8;
 const SIGNAL_TAG_PAGE_SIZE = 30;
 const SIGNAL_POSTS_CUTOFF_TIME = Date.UTC(2026, 5, 1);
 const BUIDLAI_CREDIT_FETCH_PAGES = 20;
@@ -2983,25 +2984,35 @@ async function loadSignalTweetsForTag(tagName) {
   let matches = source.filter((tweet) => tweetMatchesTag(tweet, tagName));
   if (matches.length) return matches;
 
-  for (let page = 0; page < SIGNAL_TAG_FETCH_PAGES; page += 1) {
-    const rows = await loadSignalRowsPage(page);
-    if (!Array.isArray(rows) || !rows.length) break;
+  for (let page = 0; page < SIGNAL_TAG_FETCH_PAGES; page += SIGNAL_TAG_FETCH_BATCH_SIZE) {
+    const pageNumbers = Array.from(
+      { length: Math.min(SIGNAL_TAG_FETCH_BATCH_SIZE, SIGNAL_TAG_FETCH_PAGES - page) },
+      (_, index) => page + index
+    );
+    const pageRows = await Promise.all(pageNumbers.map((pageNumber) => loadSignalRowsPage(pageNumber)));
+    let shouldStop = false;
 
-    const scopedRows = filterSignalTweetsByCutoff(rows);
-    if (scopedRows.length) {
-      source = mergeTweetRows(source, scopedRows);
-      matches = source.filter((tweet) => tweetMatchesTag(tweet, tagName));
-      if (matches.length) break;
-    }
+    pageRows.forEach((rows) => {
+      if (!Array.isArray(rows) || !rows.length) {
+        shouldStop = true;
+        return;
+      }
 
-    const oldest = rows.reduce((min, tweet) => {
-      const time = signalTweetTimeValue(tweet);
-      return time > 0 ? Math.min(min, time) : min;
-    }, Infinity);
-    if (rows.length < SIGNAL_TAG_PAGE_SIZE || oldest < SIGNAL_POSTS_CUTOFF_TIME) break;
+      const scopedRows = filterSignalTweetsByCutoff(rows);
+      if (scopedRows.length) source = mergeTweetRows(source, scopedRows);
+
+      const oldest = rows.reduce((min, tweet) => {
+        const time = signalTweetTimeValue(tweet);
+        return time > 0 ? Math.min(min, time) : min;
+      }, Infinity);
+      if (rows.length < SIGNAL_TAG_PAGE_SIZE || oldest < SIGNAL_POSTS_CUTOFF_TIME) shouldStop = true;
+    });
+
+    matches = source.filter((tweet) => tweetMatchesTag(tweet, tagName));
+    if (matches.length || shouldStop) break;
   }
 
-  if (source.length > currentTweets.length) currentTweets = source;
+  if (source.length > currentTweets.length) currentTweets = mergeTweetRows(currentTweets, source);
   return matches;
 }
 
