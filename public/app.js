@@ -78,6 +78,7 @@ let currentCommunity = null;
 let currentIpshares = [];
 let signalMode = "new";
 let selectedMiniTag = null;
+let signalFeedRequestId = 0;
 let miniTags = [];
 const SIGNAL_TAG_LOOKBACK_DAYS = 7;
 const SIGNAL_TAG_FETCH_PAGES = 20;
@@ -2918,6 +2919,7 @@ async function loadRecentSignalTweets() {
 }
 
 async function loadSignalPage() {
+  const requestId = ++signalFeedRequestId;
   renderMiniTags();
   currentTweets = filterSignalTweetsByCutoff(currentTweets);
   renderSignalFeed(currentTweets);
@@ -2957,41 +2959,46 @@ async function loadSignalPage() {
     }).catch(() => {});
 
     renderMiniTags();
-    renderSignalFeed(currentTweets);
+    if (requestId === signalFeedRequestId) renderSignalFeed(currentTweets);
   } catch {
-    renderSignalFeed(fallbackTweets);
+    if (requestId === signalFeedRequestId) renderSignalFeed(fallbackTweets);
   }
 }
 
 async function loadSignalFeed() {
+  const requestId = ++signalFeedRequestId;
+  const tagSnapshot = selectedMiniTag;
+  const modeSnapshot = signalMode;
   try {
     let tweets;
     let hasScopedTagFeed = false;
-    if (selectedMiniTag) {
+    if (tagSnapshot) {
       hasScopedTagFeed = true;
       // Try the API endpoint first; if it fails or returns empty, fall back to local filtering
       tweets = await apiGet("/curation/tagTweets", {
-        communityId: selectedMiniTag.tick || TICK,
-        tag: selectedMiniTag.tag || selectedMiniTag.name,
+        communityId: tagSnapshot.tick || TICK,
+        tag: tagSnapshot.tag || tagSnapshot.name,
         pages: 0
       }).catch(() => null);
       tweets = filterSignalTweetsByCutoff(tweets);
       // If the tag endpoint has no in-scope rows, filter locally from the current All feed.
       if (!Array.isArray(tweets) || !tweets.length) {
-        const tagName = selectedMiniTag.tag || selectedMiniTag.name || "";
+        const tagName = tagSnapshot.tag || tagSnapshot.name || "";
         tweets = filterSignalTweetsByCutoff(currentTweets).filter((t) => tweetMatchesTag(t, tagName));
       }
       // Apply the Trending/New ordering within the selected tag's posts.
-      tweets = sortTweetsByMode(tweets, signalMode);
-    } else if (signalMode === "trending") {
+      tweets = sortTweetsByMode(tweets, modeSnapshot);
+    } else if (modeSnapshot === "trending") {
       tweets = filterSignalTweetsByCutoff(await apiGet("/curation/communityTrendingTweets", { tick: TICK, pages: 0 }));
     } else {
       tweets = filterSignalTweetsByCutoff(await apiGet("/curation/communityTweets", { tick: TICK, pages: 0 }));
     }
     const result = hasScopedTagFeed ? (Array.isArray(tweets) ? tweets : []) : (Array.isArray(tweets) && tweets.length ? tweets : filterSignalTweetsByCutoff(currentTweets));
     await loadBuidlaiCreditMap().catch(() => currentBuidlaiCreditMap);
+    if (requestId !== signalFeedRequestId) return;
     renderSignalFeed(applyBuidlaiPoBAmounts(result));
   } catch {
+    if (requestId !== signalFeedRequestId) return;
     renderSignalFeed(currentTweets);
   }
 }
