@@ -82,7 +82,7 @@ let signalFeedRequestId = 0;
 let signalPageDataPromise = null;
 let miniTags = [];
 const SIGNAL_TAG_LOOKBACK_DAYS = 7;
-const SIGNAL_TAG_FETCH_PAGES = 20;
+const SIGNAL_TAG_FETCH_PAGES = 60;
 const SIGNAL_TAG_PAGE_SIZE = 30;
 const SIGNAL_POSTS_CUTOFF_TIME = Date.UTC(2026, 5, 1);
 const BUIDLAI_CREDIT_FETCH_PAGES = 20;
@@ -134,6 +134,19 @@ function signalTweetTimeValue(tweet) {
 
 function filterSignalTweetsByCutoff(tweets) {
   return (Array.isArray(tweets) ? tweets : []).filter((tweet) => signalTweetTimeValue(tweet) >= SIGNAL_POSTS_CUTOFF_TIME);
+}
+
+function tweetIdentity(tweet) {
+  return tweet?.tweetId || `${tweet?.twitterId || ""}-${tweet?.tweetTime || ""}-${tweet?.content || ""}`;
+}
+
+function mergeTweetRows(baseRows, nextRows) {
+  const map = new Map();
+  [...(Array.isArray(baseRows) ? baseRows : []), ...(Array.isArray(nextRows) ? nextRows : [])].forEach((tweet) => {
+    const id = tweetIdentity(tweet);
+    if (id) map.set(id, tweet);
+  });
+  return Array.from(map.values());
 }
 
 function translateActionType(actionType) {
@@ -2919,6 +2932,32 @@ async function loadRecentSignalTweets() {
     .sort((a, b) => signalTweetTimeValue(b) - signalTweetTimeValue(a));
 }
 
+async function loadSignalTweetsForTag(tagName) {
+  let source = filterSignalTweetsByCutoff(currentTweets);
+  let matches = source.filter((tweet) => tweetMatchesTag(tweet, tagName));
+  const maxPages = Math.max(SIGNAL_TAG_FETCH_PAGES, 60);
+
+  for (let page = 0; page < maxPages; page += 1) {
+    const rows = await apiGet("/curation/communityTweets", { tick: TICK, pages: page }).catch(() => []);
+    if (!Array.isArray(rows) || !rows.length) break;
+
+    const scopedRows = filterSignalTweetsByCutoff(rows);
+    if (scopedRows.length) {
+      source = mergeTweetRows(source, scopedRows);
+      matches = source.filter((tweet) => tweetMatchesTag(tweet, tagName));
+    }
+
+    const oldest = rows.reduce((min, tweet) => {
+      const time = signalTweetTimeValue(tweet);
+      return time > 0 ? Math.min(min, time) : min;
+    }, Infinity);
+    if (rows.length < SIGNAL_TAG_PAGE_SIZE || oldest < SIGNAL_POSTS_CUTOFF_TIME) break;
+  }
+
+  if (source.length > currentTweets.length) currentTweets = source;
+  return matches;
+}
+
 async function loadSignalPage() {
   const requestId = ++signalFeedRequestId;
   renderMiniTags();
@@ -2992,6 +3031,7 @@ async function loadSignalFeed() {
         }
       }
       tweets = filterSignalTweetsByCutoff(localSourceTweets).filter((t) => tweetMatchesTag(t, tagName));
+      if (!Array.isArray(tweets) || !tweets.length) tweets = await loadSignalTweetsForTag(tagName);
       // If local feed has no rows yet, use the tag endpoint as a supplement.
       if (!Array.isArray(tweets) || !tweets.length) {
         tweets = await apiGet("/curation/tagTweets", {
