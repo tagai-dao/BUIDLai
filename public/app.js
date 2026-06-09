@@ -530,18 +530,61 @@ function tweetMatchesTag(tweet, tagName) {
   return new RegExp("\\$" + cashtag + "(?![A-Za-z0-9_])", "i").test(String(tweet.content || ""));
 }
 
+function buildMiniTagsFromTweets(tweets) {
+  const tagSet = new Map();
+  (Array.isArray(tweets) ? tweets : []).forEach((tweet) => {
+    const content = String(tweet.content || "");
+    const matches = content.matchAll(/\$([A-Za-z][A-Za-z0-9_]{1,})/g);
+    for (const match of matches) {
+      const name = match[1];
+      tagSet.set(name.toUpperCase(), name);
+    }
+    if (!tweet.tags) return;
+    try {
+      const parsed = typeof tweet.tags === "string" ? JSON.parse(tweet.tags) : tweet.tags;
+      if (Array.isArray(parsed)) {
+        parsed.forEach((tag) => {
+          if (tag && typeof tag === "string" && tag.length > 1) {
+            tagSet.set(tag.toUpperCase(), tag);
+          }
+        });
+      }
+    } catch {}
+  });
+  return Array.from(tagSet.values()).map((name) => ({
+    id: name,
+    name,
+    tag: name,
+    tick: TICK,
+    type: 1
+  }));
+}
+
+function mergeMiniTags(apiTags, tweetTags) {
+  const map = new Map();
+  [...(Array.isArray(apiTags) ? apiTags : []), ...(Array.isArray(tweetTags) ? tweetTags : [])].forEach((tag) => {
+    const name = tag?.name || tag?.tag || tag?.tick || "";
+    const key = String(name).toUpperCase();
+    if (!key || key === TICK) return;
+    map.set(key, { ...(map.get(key) || {}), ...tag, name, tag: tag?.tag || name, tick: tag?.tick || TICK });
+  });
+  return Array.from(map.values());
+}
+
 // Sort sub-tags by the summed top-right reward across all in-scope #BUIDL posts.
 function sortMiniTagsByReward(tags, tweets) {
   const rows = Array.isArray(tweets) ? tweets : [];
   tags.forEach((tag) => {
     const name = tag.name || tag.tag || "";
+    tag.postCount = rows.reduce((sum, t) => sum + (tweetMatchesTag(t, name) ? 1 : 0), 0);
     tag.rewardSum = rows.reduce(
       (sum, t) => sum + (tweetMatchesTag(t, name) ? tweetReward(t) : 0),
       0
     );
   });
-  tags.sort((a, b) => (b.rewardSum || 0) - (a.rewardSum || 0));
-  return tags;
+  return tags
+    .filter((tag) => Number(tag.postCount || 0) > 0)
+    .sort((a, b) => (b.rewardSum || 0) - (a.rewardSum || 0) || (b.postCount || 0) - (a.postCount || 0));
 }
 
 function formatSignalTime(value) {
@@ -2887,43 +2930,10 @@ async function loadSignalPage() {
     const scopedTweets = filterSignalTweetsByCutoff(Array.isArray(tweets) && tweets.length ? tweets : currentTweets);
     currentTweets = applyBuidlaiPoBAmounts(scopedTweets);
     const tagSourceTweets = currentTweets;
+    const tweetMiniTags = buildMiniTagsFromTweets(tagSourceTweets);
 
-    // Use API mini tags if available, otherwise extract $CASHTAGs from tweet content
-    if (Array.isArray(tags) && tags.length) {
-      miniTags = tags;
-    } else {
-      // Extract unique $CASHTAG mentions from all tweets
-      const tagSet = new Map();
-      tagSourceTweets.forEach((t) => {
-        const content = String(t.content || "");
-        const matches = content.matchAll(/\$([A-Za-z][A-Za-z0-9_]{1,})/g);
-        for (const match of matches) {
-          const name = match[1];
-          tagSet.set(name.toUpperCase(), name);
-        }
-      });
-      // Also parse the tweet 'tags' field (JSON string array)
-      tagSourceTweets.forEach((t) => {
-        if (!t.tags) return;
-        try {
-          const parsed = typeof t.tags === "string" ? JSON.parse(t.tags) : t.tags;
-          if (Array.isArray(parsed)) {
-            parsed.forEach((tag) => {
-              if (tag && typeof tag === "string" && tag.length > 1) {
-                tagSet.set(tag.toUpperCase(), tag);
-              }
-            });
-          }
-        } catch {}
-      });
-      miniTags = Array.from(tagSet.values()).map((name) => ({
-        id: name,
-        name,
-        tag: name,
-        tick: TICK,
-        type: 1
-      }));
-    }
+    // Merge API mini tags with tags actually present in the current in-scope feed.
+    miniTags = mergeMiniTags(tags, tweetMiniTags);
 
     // Order sub-tags by the summed top-right reward of all in-scope #BUIDL posts.
     miniTags = sortMiniTagsByReward(miniTags, tagSourceTweets);
@@ -2965,21 +2975,14 @@ async function loadSignalFeed() {
         tag: selectedMiniTag.tag || selectedMiniTag.name,
         pages: 0
       }).catch(() => null);
-      // If API returned nothing, filter locally by $CASHTAG in content or tags field
+      tweets = filterSignalTweetsByCutoff(tweets);
+      // If the tag endpoint has no in-scope rows, filter locally from the current All feed.
       if (!Array.isArray(tweets) || !tweets.length) {
-        const tagName = (selectedMiniTag.tag || selectedMiniTag.name || "").toUpperCase();
-        tweets = currentTweets.filter((t) => {
-          const content = String(t.content || "").toUpperCase();
-          if (content.includes("$" + tagName)) return true;
-          try {
-            const parsed = typeof t.tags === "string" ? JSON.parse(t.tags) : t.tags;
-            if (Array.isArray(parsed) && parsed.some((tag) => String(tag).toUpperCase() === tagName)) return true;
-          } catch {}
-          return false;
-        });
+        const tagName = selectedMiniTag.tag || selectedMiniTag.name || "";
+        tweets = filterSignalTweetsByCutoff(currentTweets).filter((t) => tweetMatchesTag(t, tagName));
       }
       // Apply the Trending/New ordering within the selected tag's posts.
-      tweets = sortTweetsByMode(filterSignalTweetsByCutoff(tweets), signalMode);
+      tweets = sortTweetsByMode(tweets, signalMode);
     } else if (signalMode === "trending") {
       tweets = filterSignalTweetsByCutoff(await apiGet("/curation/communityTrendingTweets", { tick: TICK, pages: 0 }));
     } else {
