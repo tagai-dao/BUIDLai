@@ -530,15 +530,13 @@ function tweetMatchesTag(tweet, tagName) {
   return new RegExp("\\$" + cashtag + "(?![A-Za-z0-9_])", "i").test(String(tweet.content || ""));
 }
 
-// Sort sub-tags by the 7-day, time-decayed top-right reward of their #BUIDL posts.
+// Sort sub-tags by the summed top-right reward across all in-scope #BUIDL posts.
 function sortMiniTagsByReward(tags, tweets) {
-  const recent = (Array.isArray(tweets) ? tweets : []).filter(
-    (t) => signalTagTimeWeight(t.tweetTime) > 0
-  );
+  const rows = Array.isArray(tweets) ? tweets : [];
   tags.forEach((tag) => {
     const name = tag.name || tag.tag || "";
-    tag.rewardSum = recent.reduce(
-      (sum, t) => sum + (tweetMatchesTag(t, name) ? tweetReward(t) * signalTagTimeWeight(t.tweetTime) : 0),
+    tag.rewardSum = rows.reduce(
+      (sum, t) => sum + (tweetMatchesTag(t, name) ? tweetReward(t) : 0),
       0
     );
   });
@@ -2888,7 +2886,7 @@ async function loadSignalPage() {
     ]);
     const scopedTweets = filterSignalTweetsByCutoff(Array.isArray(tweets) && tweets.length ? tweets : currentTweets);
     currentTweets = applyBuidlaiPoBAmounts(scopedTweets);
-    const tagSourceTweets = currentTweets.filter((tweet) => signalTagTimeWeight(tweet.tweetTime) > 0);
+    const tagSourceTweets = currentTweets;
 
     // Use API mini tags if available, otherwise extract $CASHTAGs from tweet content
     if (Array.isArray(tags) && tags.length) {
@@ -2927,7 +2925,7 @@ async function loadSignalPage() {
       }));
     }
 
-    // Order sub-tags by the summed, time-decayed top-right reward of their last-week #BUIDL posts.
+    // Order sub-tags by the summed top-right reward of all in-scope #BUIDL posts.
     miniTags = sortMiniTagsByReward(miniTags, tagSourceTweets);
 
     // Real stats from API data
