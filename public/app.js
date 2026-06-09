@@ -80,8 +80,11 @@ let signalMode = "new";
 let selectedMiniTag = null;
 let signalFeedRequestId = 0;
 let signalPageDataPromise = null;
+let signalBackfillPromise = null;
+let signalApiMiniTags = [];
 let miniTags = [];
 const SIGNAL_TAG_LOOKBACK_DAYS = 7;
+const SIGNAL_INITIAL_FETCH_PAGES = 6;
 const SIGNAL_TAG_FETCH_PAGES = 60;
 const SIGNAL_TAG_PAGE_SIZE = 30;
 const SIGNAL_POSTS_CUTOFF_TIME = Date.UTC(2026, 5, 1);
@@ -155,6 +158,22 @@ function mergeTweetRows(baseRows, nextRows) {
     if (id) map.set(id, tweet);
   });
   return Array.from(map.values());
+}
+
+const signalPageCache = new Map();
+const signalPageFetches = new Map();
+
+async function loadSignalRowsPage(page) {
+  if (signalPageCache.has(page)) return signalPageCache.get(page);
+  if (signalPageFetches.has(page)) return signalPageFetches.get(page);
+  const promise = apiGet("/curation/communityTweets", { tick: TICK, pages: page })
+    .then((rows) => Array.isArray(rows) ? rows : [])
+    .catch(() => []);
+  signalPageFetches.set(page, promise);
+  const rows = await promise;
+  signalPageCache.set(page, rows);
+  signalPageFetches.delete(page);
+  return rows;
 }
 
 function translateActionType(actionType) {
@@ -609,6 +628,14 @@ function sortMiniTagsByReward(tags, tweets) {
   return tags
     .filter((tag) => Number(tag.postCount || 0) > 0)
     .sort((a, b) => (b.rewardSum || 0) - (a.rewardSum || 0) || (b.postCount || 0) - (a.postCount || 0));
+}
+
+function refreshSignalMiniTags() {
+  miniTags = sortMiniTagsByReward(
+    mergeMiniTags(signalApiMiniTags, buildMiniTagsFromTweets(currentTweets)),
+    currentTweets
+  );
+  renderMiniTags();
 }
 
 function formatSignalTime(value) {
@@ -2924,10 +2951,10 @@ async function blinksWaitReceipt(provider, hash, timeoutMs = 60000) {
   return false;
 }
 
-async function loadRecentSignalTweets() {
+async function loadRecentSignalTweets(pageLimit = SIGNAL_INITIAL_FETCH_PAGES) {
   const pages = [];
-  for (let page = 0; page < SIGNAL_TAG_FETCH_PAGES; page += 1) {
-    const rows = await apiGet("/curation/communityTweets", { tick: TICK, pages: page }).catch(() => []);
+  for (let page = 0; page < pageLimit; page += 1) {
+    const rows = await loadSignalRowsPage(page);
     if (!Array.isArray(rows) || !rows.length) break;
     pages.push(rows);
     const oldest = rows.reduce((min, tweet) => {
@@ -2954,16 +2981,17 @@ async function loadRecentSignalTweets() {
 async function loadSignalTweetsForTag(tagName) {
   let source = filterSignalTweetsByCutoff(currentTweets);
   let matches = source.filter((tweet) => tweetMatchesTag(tweet, tagName));
-  const maxPages = Math.max(SIGNAL_TAG_FETCH_PAGES, 60);
+  if (matches.length) return matches;
 
-  for (let page = 0; page < maxPages; page += 1) {
-    const rows = await apiGet("/curation/communityTweets", { tick: TICK, pages: page }).catch(() => []);
+  for (let page = 0; page < SIGNAL_TAG_FETCH_PAGES; page += 1) {
+    const rows = await loadSignalRowsPage(page);
     if (!Array.isArray(rows) || !rows.length) break;
 
     const scopedRows = filterSignalTweetsByCutoff(rows);
     if (scopedRows.length) {
       source = mergeTweetRows(source, scopedRows);
       matches = source.filter((tweet) => tweetMatchesTag(tweet, tagName));
+      if (matches.length) break;
     }
 
     const oldest = rows.reduce((min, tweet) => {
@@ -2977,6 +3005,37 @@ async function loadSignalTweetsForTag(tagName) {
   return matches;
 }
 
+function startSignalBackfill() {
+  if (signalBackfillPromise) return signalBackfillPromise;
+  signalBackfillPromise = (async () => {
+    for (let page = SIGNAL_INITIAL_FETCH_PAGES; page < SIGNAL_TAG_FETCH_PAGES; page += 1) {
+      const rows = await loadSignalRowsPage(page);
+      if (!Array.isArray(rows) || !rows.length) break;
+
+      const scopedRows = filterSignalTweetsByCutoff(rows);
+      if (scopedRows.length) {
+        currentTweets = mergeTweetRows(currentTweets, scopedRows);
+        refreshSignalMiniTags();
+
+        if (selectedMiniTag && $("#signalFeed .signal-empty")) {
+          const tagName = selectedMiniTag.tag || selectedMiniTag.name || "";
+          const matches = currentTweets.filter((tweet) => tweetMatchesTag(tweet, tagName));
+          if (matches.length) renderSignalFeed(applyBuidlaiPoBAmounts(sortTweetsByMode(matches, signalMode)));
+        }
+      }
+
+      const oldest = rows.reduce((min, tweet) => {
+        const time = signalTweetTimeValue(tweet);
+        return time > 0 ? Math.min(min, time) : min;
+      }, Infinity);
+      if (rows.length < SIGNAL_TAG_PAGE_SIZE || oldest < SIGNAL_POSTS_CUTOFF_TIME) break;
+    }
+  })().finally(() => {
+    signalBackfillPromise = null;
+  });
+  return signalBackfillPromise;
+}
+
 async function loadSignalPage() {
   const requestId = ++signalFeedRequestId;
   renderMiniTags();
@@ -2985,20 +3044,14 @@ async function loadSignalPage() {
   try {
     signalPageDataPromise = Promise.all([
       apiGet("/communityMiniTag/getCommunityMiniTags", { tick: TICK }).catch(() => []),
-      loadRecentSignalTweets().catch(() => currentTweets),
+      loadRecentSignalTweets(SIGNAL_INITIAL_FETCH_PAGES).catch(() => currentTweets),
       loadBuidlaiCreditMap().catch(() => currentBuidlaiCreditMap)
     ]);
     const [tags, tweets] = await signalPageDataPromise;
+    signalApiMiniTags = Array.isArray(tags) ? tags : [];
     const scopedTweets = filterSignalTweetsByCutoff(Array.isArray(tweets) && tweets.length ? tweets : currentTweets);
     currentTweets = applyBuidlaiPoBAmounts(scopedTweets);
-    const tagSourceTweets = currentTweets;
-    const tweetMiniTags = buildMiniTagsFromTweets(tagSourceTweets);
-
-    // Merge API mini tags with tags actually present in the current in-scope feed.
-    miniTags = mergeMiniTags(tags, tweetMiniTags);
-
-    // Order sub-tags by the summed top-right reward of all in-scope #BUIDL posts.
-    miniTags = sortMiniTagsByReward(miniTags, tagSourceTweets);
+    refreshSignalMiniTags();
 
     // Real stats from API data
     const allTweets = currentTweets;
@@ -3018,9 +3071,9 @@ async function loadSignalPage() {
       }).catch(() => {});
     }).catch(() => {});
 
-    renderMiniTags();
     if (requestId === signalFeedRequestId) renderSignalFeed(currentTweets);
     else if (selectedMiniTag) loadSignalFeed();
+    startSignalBackfill();
   } catch {
     if (requestId === signalFeedRequestId) renderSignalFeed(fallbackTweets);
   } finally {
@@ -3050,6 +3103,9 @@ async function loadSignalFeed() {
         }
       }
       tweets = filterSignalTweetsByCutoff(localSourceTweets).filter((t) => tweetMatchesTag(t, tagName));
+      if (tweets.length && requestId === signalFeedRequestId) {
+        renderSignalFeed(applyBuidlaiPoBAmounts(sortTweetsByMode(tweets, modeSnapshot)));
+      }
       if (!Array.isArray(tweets) || !tweets.length) tweets = await loadSignalTweetsForTag(tagName);
       // If local feed has no rows yet, use the tag endpoint as a supplement.
       if (!Array.isArray(tweets) || !tweets.length) {
@@ -3065,7 +3121,7 @@ async function loadSignalFeed() {
     } else if (modeSnapshot === "trending") {
       tweets = filterSignalTweetsByCutoff(await apiGet("/curation/communityTrendingTweets", { tick: TICK, pages: 0 }));
     } else {
-      tweets = filterSignalTweetsByCutoff(await apiGet("/curation/communityTweets", { tick: TICK, pages: 0 }));
+      tweets = filterSignalTweetsByCutoff(currentTweets.length ? currentTweets : await loadSignalRowsPage(0));
     }
     const result = hasScopedTagFeed ? (Array.isArray(tweets) ? tweets : []) : (Array.isArray(tweets) && tweets.length ? tweets : filterSignalTweetsByCutoff(currentTweets));
     await loadBuidlaiCreditMap().catch(() => currentBuidlaiCreditMap);
