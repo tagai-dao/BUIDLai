@@ -79,6 +79,7 @@ let currentIpshares = [];
 let signalMode = "new";
 let selectedMiniTag = null;
 let signalFeedRequestId = 0;
+let signalPageDataPromise = null;
 let miniTags = [];
 const SIGNAL_TAG_LOOKBACK_DAYS = 7;
 const SIGNAL_TAG_FETCH_PAGES = 20;
@@ -2924,11 +2925,12 @@ async function loadSignalPage() {
   currentTweets = filterSignalTweetsByCutoff(currentTweets);
   renderSignalFeed(currentTweets);
   try {
-    const [tags, tweets] = await Promise.all([
+    signalPageDataPromise = Promise.all([
       apiGet("/communityMiniTag/getCommunityMiniTags", { tick: TICK }).catch(() => []),
       loadRecentSignalTweets().catch(() => currentTweets),
       loadBuidlaiCreditMap().catch(() => currentBuidlaiCreditMap)
     ]);
+    const [tags, tweets] = await signalPageDataPromise;
     const scopedTweets = filterSignalTweetsByCutoff(Array.isArray(tweets) && tweets.length ? tweets : currentTweets);
     currentTweets = applyBuidlaiPoBAmounts(scopedTweets);
     const tagSourceTweets = currentTweets;
@@ -2960,8 +2962,11 @@ async function loadSignalPage() {
 
     renderMiniTags();
     if (requestId === signalFeedRequestId) renderSignalFeed(currentTweets);
+    else if (selectedMiniTag) loadSignalFeed();
   } catch {
     if (requestId === signalFeedRequestId) renderSignalFeed(fallbackTweets);
+  } finally {
+    signalPageDataPromise = null;
   }
 }
 
@@ -2983,6 +2988,7 @@ async function loadSignalFeed() {
       tweets = filterSignalTweetsByCutoff(tweets);
       // If the tag endpoint has no in-scope rows, filter locally from the current All feed.
       if (!Array.isArray(tweets) || !tweets.length) {
+        if (!currentTweets.length && signalPageDataPromise) await signalPageDataPromise.catch(() => null);
         const tagName = tagSnapshot.tag || tagSnapshot.name || "";
         tweets = filterSignalTweetsByCutoff(currentTweets).filter((t) => tweetMatchesTag(t, tagName));
       }
